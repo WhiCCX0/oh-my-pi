@@ -5,7 +5,7 @@
 - AST 限定显示位置：TSX 文本/显示属性、CLI 和内置斜杠命令 description、帮助标题。设置在显示投影处翻译，不修改配置键、分组 ID 或枚举值。
 - 英文回退；检查命令参数、URL 与命名占位符；不修改系统提示词、用户输入、模型返回、工具协议、JSON/RPC 字段、按键 ID。新增界面或动态模板可能仍为英文，不宣称全量汉化。
 - 无新增运行时依赖；使用上游已有 Babel parser。UI 常量在构建期替换，设置只在显示投影时 Map 查找。
-- 汉化二进制保留上游版本号，GitHub Release 使用 vX.Y.Z-zh.1。编译版官方自更新禁用，避免被英文覆盖；升级从本仓库 Release 手动下载。
+- 汉化二进制保留上游版本号，GitHub Release 使用 zh-vX.Y.Z-r1。编译版官方自更新禁用，避免被英文覆盖；升级从本仓库 Release 手动下载。
 - 使用官方同版本 npm native leaf（保留上游版本验证）和上游构建脚本；支持 Windows、Linux glibc、macOS 的 x64/arm64，非本机架构仅构建，不声称实机验证。暂不发布 musl。
 - 发布需通过转换测试、构建、Linux/Windows/macOS 烟测；附 SHA256 校验及上游版本、commit。无 npm 发布或官方发布凭据。
 
