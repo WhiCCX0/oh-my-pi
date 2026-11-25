@@ -50,7 +50,9 @@ jobs:
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git fetch --no-tags "https://github.com/$upstream.git" refs/heads/main
             git merge --no-edit FETCH_HEAD
-            git push origin HEAD:refs/heads/main
+            if [[ $(git rev-parse HEAD) != $(git rev-parse origin/main) ]]; then
+              git push origin HEAD:refs/heads/main
+            fi
           fi
           build=true
           if [[ "$GITHUB_REF" == refs/heads/main ]] && gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -145,7 +147,7 @@ jobs:
           "./$ASSET" --version | grep -F "$VERSION"
           "./$ASSET" --help > help.txt
           grep -F '用法' help.txt
-          grep -F 'AI 编程助手' help.txt
+          grep -F '要发送的消息' help.txt
           "./$ASSET" --smoke-test
   publish:
     needs: [prepare, build, smoke]
