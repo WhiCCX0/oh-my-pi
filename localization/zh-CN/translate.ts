@@ -43,6 +43,7 @@ export function transform(source: string, file: string, dict: Dictionary) {
 	const jsx = file.endsWith(".tsx");
 	const command = /\/(?:commands\/[^/]+|slash-commands\/builtin-[^/]+)\.ts$/.test(file);
 	const cli = file === "packages/utils/src/cli.ts";
+	const settingsPages = file === "packages/coding-agent/src/ui/overlays/settings/pages.ts";
 	function literal(node: Node, table: Dictionary = dict) {
 		const translated = lookup(table, node.value);
 		if (translated !== node.value) edits.push({ start: node.start, end: node.end, text: JSON.stringify(translated) });
@@ -71,6 +72,8 @@ export function transform(source: string, file: string, dict: Dictionary) {
 			} else if (node.value?.type === "JSXExpressionContainer") expression(node.value.expression);
 		}
 		if (jsx && node.type === "JSXExpressionContainer" && parent?.type === "JSXElement") expression(node.expression);
+		if (settingsPages && node.type === "ObjectProperty" && !node.computed &&
+			["label", "lead"].includes(prop(node.key) ?? "") && node.value?.type === "StringLiteral") literal(node.value);
 		if (command && (node.type === "ObjectProperty" || node.type === "ClassProperty") &&
 			!node.computed && prop(node.key) === "description" && node.value?.type === "StringLiteral") literal(node.value);
 		if (cli && node.type === "CallExpression" && node.callee?.type === "MemberExpression" &&
@@ -112,7 +115,7 @@ async function main() {
 	let count = 0; let modified = 0;
 	for (const file of paths) {
 		const name = relative(root, file).replaceAll("\\", "/");
-		if (!name.endsWith(".tsx") && !/\/(?:commands\/[^/]+|slash-commands\/builtin-[^/]+)\.ts$/.test(name) && name !== "packages/utils/src/cli.ts") continue;
+		if (!name.endsWith(".tsx") && !/\/(?:commands\/[^/]+|slash-commands\/builtin-[^/]+)\.ts$/.test(name) && name !== "packages/utils/src/cli.ts" && name !== "packages/coding-agent/src/ui/overlays/settings/pages.ts") continue;
 		const source = await readFile(file, "utf8");
 		const result = transform(source, name, dict);
 		if (result.count) { await writeFile(file, result.source); count += result.count; modified++; }

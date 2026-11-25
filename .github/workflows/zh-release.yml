@@ -49,7 +49,7 @@ jobs:
             gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main
           fi
           build=true
-          if [[ "$GITHUB_REF" == refs/heads/main ]] && gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if [[ "$GITHUB_REF" == refs/heads/main ]] && [[ $(gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true) == false ]]; then
             build=false
           fi
           printf 'version=%s\nsha=%s\ntag=%s\nbuild=%s\nbun=%s\n' "${tag#v}" "$sha" "$local_tag" "$build" "$bun" >> "$GITHUB_OUTPUT"
@@ -105,6 +105,7 @@ jobs:
           npm pack --ignore-scripts --pack-destination "$dir" "@oh-my-pi/pi-natives-$NATIVE@$VERSION"
           tar -xzf "$dir"/*.tgz -C "$dir"
           cp "$dir"/package/*.node packages/natives/native/
+          cp "$dir"/package/THIRD-PARTY-NOTICES.txt packages/natives/native/THIRD-PARTY-NOTICES.txt
       - name: Regenerate localized export viewer manifest
         working-directory: source
         run: bun --cwd=packages/collab-web run gen:export-viewer --write
@@ -121,6 +122,13 @@ jobs:
         with:
           name: binary-${{ matrix.target }}
           path: source/packages/coding-agent/binaries/${{ matrix.asset }}
+          if-no-files-found: error
+      - name: Upload native license notices
+        if: matrix.target == 'linux-x64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: binary-legal
+          path: source/packages/natives/native/THIRD-PARTY-NOTICES.txt
           if-no-files-found: error
   smoke:
     needs: [prepare, build]
@@ -185,9 +193,18 @@ jobs:
           SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then exit 0; fi
+          state=$(gh release view "$TAG" --json isDraft,targetCommitish 2>/dev/null || true)
+          if [[ -n "$state" ]] && [[ $(jq -r .isDraft <<< "$state") == false ]]; then exit 0; fi
+          if [[ -n "$state" ]] && [[ $(jq -r .targetCommitish <<< "$state") != "$GITHUB_SHA" ]]; then
+            echo "::error::Existing draft targets a different overlay commit; bump ZH_REVISION or review the draft."
+            exit 1
+          fi
           cp LICENSE dist/LICENSE
           cp localization/zh-CN/LICENSE-dictionary dist/LICENSE-dictionary
           (cd dist && sha256sum omp-* > SHA256SUMS.txt)
           printf '上游版本：v%s\n上游提交：%s\n汉化覆盖层提交：%s\n\n界面与帮助汉化，未覆盖的文字保留英文。Windows、Linux glibc、macOS 的 x64 与 arm64 均通过基础烟测。macOS 为 ad-hoc 签名。请从本仓库下载更新。\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_SHA" > notes.md
-          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG 简体中文版" --notes-file notes.md
+          if [[ -z "$state" ]]; then
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG 简体中文版" --notes-file notes.md
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          gh release edit "$TAG" --draft=false --notes-file notes.md

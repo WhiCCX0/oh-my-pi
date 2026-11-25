@@ -25,5 +25,15 @@
   "Continue previous session": "继续上次会话",
   "Non-interactive mode: process prompt and exit": "非交互模式：处理提示后退出",
   "Don't save session (ephemeral)": "不保存会话（临时模式）",
-  "Start fresh in goal mode (interactive only; bypasses autoResume; no positional prompt, startup plan mode, or explicit resume)": "以目标模式开始新会话（仅交互模式；跳过 autoResume；不可同时使用位置提示、启动计划模式或显式恢复）"
+  "Start fresh in goal mode (interactive only; bypasses autoResume; no positional prompt, startup plan mode, or explicit resume)": "以目标模式开始新会话（仅交互模式；跳过 autoResume；不可同时使用位置提示、启动计划模式或显式恢复）",
+  "Theme, composer, status line and how the transcript renders.": "主题、输入框、状态栏和对话记录的显示方式。",
+  "Thinking, sampling, the system prompt, retries and the helper models.": "思考、采样、系统提示词、重试和辅助模型。",
+  "Input, approvals, notifications, speech and what happens at startup.": "输入、审批、通知、语音和启动行为。",
+  "What the model sees, and when and how the conversation compacts.": "模型可见的内容，以及对话压缩的时机和方式。",
+  "What omp remembers across sessions and where it keeps it.": "omp 的跨会话记忆内容及保存位置。",
+  "How files are read, summarized and edited, and the language servers.": "文件读取、摘要、编辑以及语言服务器。",
+  "The bash tool and the eval runtimes.": "Bash 工具和代码执行环境。",
+  "Which tools the model has, their limits and the external integrations.": "模型可用工具、限制与外部集成。",
+  "Modes, subagents, isolation and custom commands.": "模式、子 Agent、隔离及自定义命令。",
+  "Services, provider protocols, timeouts and privacy.": "服务、提供商协议、超时与隐私。"
 }

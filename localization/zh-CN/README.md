@@ -14,3 +14,5 @@
 参考 feigo313/oh-my-pi-zh 的资源隔离、yequ172672/oh-my-pi-cn 的显示层边界和 yebuwudong/omp-zh 的 AST 安全原则；未引入其它项目运行时代码。
 
 词典固定版本：https://github.com/yebuwudong/omp-zh/tree/ffdaf6080ade61813b7d581d584d321ea77fa49d
+
+发布时附带原生模块第三方版权声明。发布过程先建草稿、上传全部资产，再公开；同一提交可重试草稿，已公开版本不覆盖。
