@@ -27,9 +27,6 @@ jobs:
       build: ${{ steps.release.outputs.build }}
       bun: ${{ steps.release.outputs.bun }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 0
       - name: Resolve stable release and sync upstream main
         id: release
         shell: bash
@@ -40,19 +37,16 @@ jobs:
           upstream=can1357/oh-my-pi
           tag=$(gh api "repos/$upstream/releases/latest" --jq .tag_name)
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          git fetch --no-tags "https://github.com/$upstream.git" "refs/tags/$tag"
-          sha=$(git rev-parse 'FETCH_HEAD^{commit}')
-          bun=$(git show "$sha:.github/workflows/ci.yml" | sed -nE 's/^[[:space:]]*bun-version: ([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p' | sort -u)
+          refs=$(git ls-remote "https://github.com/$upstream.git" "refs/tags/$tag" "refs/tags/$tag^{}")
+          sha=$(printf '%s\n' "$refs" | awk '/\^\{\}$/ { print $1; found=1 } END { if (!found) exit 1 }' || true)
+          if [[ -z "$sha" ]]; then sha=$(printf '%s\n' "$refs" | awk 'NR == 1 { print $1 }'); fi
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
+          bun=$(gh api "repos/$upstream/contents/.github/workflows/ci.yml?ref=$sha" --jq .content | base64 -d | sed -nE 's/^[[:space:]]*bun-version: ([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p' | sort -u)
           [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           local_tag="zh-$tag-r$ZH_REVISION"
           if [[ "$GITHUB_REF" == refs/heads/main ]]; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git fetch --no-tags "https://github.com/$upstream.git" refs/heads/main
-            git merge --no-edit FETCH_HEAD
-            if [[ $(git rev-parse HEAD) != $(git rev-parse origin/main) ]]; then
-              git push origin HEAD:refs/heads/main
-            fi
+            # GitHub's native non-force fork synchronization API.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main
           fi
           build=true
           if [[ "$GITHUB_REF" == refs/heads/main ]] && gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -116,6 +110,10 @@ jobs:
         env:
           RELEASE_TARGETS: ${{ matrix.target }}
         run: bun run ci:release:build-binaries
+      - name: Ad-hoc sign macOS binary using upstream procedure
+        if: startsWith(matrix.target, 'darwin-')
+        working-directory: source
+        run: bash scripts/ci-macos-sign.sh "packages/coding-agent/binaries/${{ matrix.asset }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: binary-${{ matrix.target }}
@@ -128,9 +126,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: windows-latest, target: win32-x64, asset: omp-windows-x64.exe }
+          - { runner: windows-2025, target: win32-x64, asset: omp-windows-x64.exe }
+          - { runner: windows-11-arm, target: win32-arm64, asset: omp-windows-arm64.exe }
           - { runner: ubuntu-22.04, target: linux-x64, asset: omp-linux-x64 }
+          - { runner: ubuntu-24.04-arm, target: linux-arm64, asset: omp-linux-arm64 }
           - { runner: macos-15, target: darwin-arm64, asset: omp-darwin-arm64 }
+          - { runner: macos-15-intel, target: darwin-x64, asset: omp-darwin-x64 }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -144,6 +145,14 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x "$ASSET"
+          if [[ "$RUNNER_OS" == macOS ]]; then codesign --verify --strict --verbose=2 "$ASSET"; fi
+          runtime_dir=$(mktemp -d)
+          export HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg"
+          mkdir -p "$HOME" "$XDG_DATA_HOME"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export USERPROFILE="$(cygpath -w "$HOME")" LOCALAPPDATA="$(cygpath -w "$runtime_dir/local")"
+            mkdir -p "$runtime_dir/local"
+          fi
           "./$ASSET" --version | grep -F "$VERSION"
           "./$ASSET" --help > help.txt
           grep -F '用法' help.txt
@@ -177,5 +186,5 @@ jobs:
           cp LICENSE dist/LICENSE
           cp localization/zh-CN/LICENSE-dictionary dist/LICENSE-dictionary
           (cd dist && sha256sum omp-* > SHA256SUMS.txt)
-          printf '上游版本：v%s\n上游提交：%s\n汉化覆盖层提交：%s\n\n界面与帮助汉化，未覆盖的文字保留英文。Windows x64、Linux x64、macOS arm64 通过烟测；其他架构仅构建。请从本仓库下载更新。\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_SHA" > notes.md
+          printf '上游版本：v%s\n上游提交：%s\n汉化覆盖层提交：%s\n\n界面与帮助汉化，未覆盖的文字保留英文。Windows、Linux glibc、macOS 的 x64 与 arm64 均通过基础烟测。macOS 为 ad-hoc 签名。请从本仓库下载更新。\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_SHA" > notes.md
           gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG 简体中文版" --notes-file notes.md
