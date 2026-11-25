@@ -1,0 +1,179 @@
+name: 中文版同步与发布
+on:
+  push:
+    branches: [main, zh-localization]
+    paths:
+      - 'localization/zh-CN/**'
+      - '.github/workflows/zh-release.yml'
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: zh-release
+  cancel-in-progress: false
+env:
+  ZH_REVISION: '1'
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+      tag: ${{ steps.release.outputs.tag }}
+      build: ${{ steps.release.outputs.build }}
+      bun: ${{ steps.release.outputs.bun }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+      - name: Resolve stable release and sync upstream main
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream=can1357/oh-my-pi
+          tag=$(gh api "repos/$upstream/releases/latest" --jq .tag_name)
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch --no-tags "https://github.com/$upstream.git" "refs/tags/$tag"
+          sha=$(git rev-parse 'FETCH_HEAD^{commit}')
+          bun=$(git show "$sha:.github/workflows/ci.yml" | sed -nE 's/^[[:space:]]*bun-version: ([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p' | sort -u)
+          [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          local_tag="$tag-zh.$ZH_REVISION"
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git fetch --no-tags "https://github.com/$upstream.git" refs/heads/main
+            git merge --no-edit FETCH_HEAD
+            git push origin HEAD:refs/heads/main
+          fi
+          build=true
+          if [[ "$GITHUB_REF" == refs/heads/main ]] && gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            build=false
+          fi
+          printf 'version=%s\nsha=%s\ntag=%s\nbuild=%s\nbun=%s\n' "${tag#v}" "$sha" "$local_tag" "$build" "$bun" >> "$GITHUB_OUTPUT"
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: win32-x64, native: win32-x64, asset: omp-windows-x64.exe }
+          - { target: win32-arm64, native: win32-arm64, asset: omp-windows-arm64.exe }
+          - { target: linux-x64, native: linux-x64, asset: omp-linux-x64 }
+          - { target: linux-arm64, native: linux-arm64, asset: omp-linux-arm64 }
+          - { target: darwin-x64, native: darwin-x64, asset: omp-darwin-x64 }
+          - { target: darwin-arm64, native: darwin-arm64, asset: omp-darwin-arm64 }
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: overlay
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: can1357/oh-my-pi
+          ref: ${{ needs.prepare.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ needs.prepare.outputs.bun }}
+      - name: Install locked upstream dependencies
+        working-directory: source
+        run: bun install --frozen-lockfile
+      - name: Test and apply localization
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -R ../overlay/localization/zh-CN .zh-build
+          bun test .zh-build/translate.test.ts
+          bun .zh-build/translate.ts
+          git diff --check
+      - name: Install matching upstream native addon
+        working-directory: source
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          NATIVE: ${{ matrix.native }}
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          npm pack --ignore-scripts --pack-destination "$dir" "@oh-my-pi/pi-natives-$NATIVE@$VERSION"
+          tar -xzf "$dir"/*.tgz -C "$dir"
+          cp "$dir"/package/*.node packages/natives/native/
+      - name: Build standalone binary
+        working-directory: source
+        env:
+          RELEASE_TARGETS: ${{ matrix.target }}
+        run: bun run ci:release:build-binaries
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: binary-${{ matrix.target }}
+          path: source/packages/coding-agent/binaries/${{ matrix.asset }}
+          if-no-files-found: error
+  smoke:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: win32-x64, asset: omp-windows-x64.exe }
+          - { runner: ubuntu-22.04, target: linux-x64, asset: omp-linux-x64 }
+          - { runner: macos-15, target: darwin-arm64, asset: omp-darwin-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: binary-${{ matrix.target }}
+      - name: Verify compiled version and Chinese help
+        shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x "$ASSET"
+          "./$ASSET" --version | grep -F "$VERSION"
+          "./$ASSET" --help > help.txt
+          grep -F '用法' help.txt
+          grep -F 'AI 编程助手' help.txt
+          "./$ASSET" --smoke-test
+  publish:
+    needs: [prepare, build, smoke]
+    if: github.ref == 'refs/heads/main' && needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist
+      - name: Publish immutable Chinese release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then exit 0; fi
+          cp LICENSE dist/LICENSE
+          cp localization/zh-CN/LICENSE-dictionary dist/LICENSE-dictionary
+          (cd dist && sha256sum omp-* > SHA256SUMS.txt)
+          printf '上游版本：v%s\n上游提交：%s\n汉化覆盖层提交：%s\n\n界面与帮助汉化，未覆盖的文字保留英文。Windows x64、Linux x64、macOS arm64 通过烟测；其他架构仅构建。请从本仓库下载更新。\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_SHA" > notes.md
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG 简体中文版" --notes-file notes.md
