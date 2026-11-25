@@ -44,7 +44,7 @@ jobs:
           sha=$(git rev-parse 'FETCH_HEAD^{commit}')
           bun=$(git show "$sha:.github/workflows/ci.yml" | sed -nE 's/^[[:space:]]*bun-version: ([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p' | sort -u)
           [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          local_tag="$tag-zh.$ZH_REVISION"
+          local_tag="zh-$tag-r$ZH_REVISION"
           if [[ "$GITHUB_REF" == refs/heads/main ]]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
