@@ -16,3 +16,5 @@
 词典固定版本：https://github.com/yebuwudong/omp-zh/tree/ffdaf6080ade61813b7d581d584d321ea77fa49d
 
 发布时附带原生模块第三方版权声明。发布过程先建草稿、上传全部资产，再公开；同一提交可重试草稿，已公开版本不覆盖。
+
+导出 HTML 的 viewer 内容哈希因构建期转换而变化，因此将校验过的 viewer 内联到汉化二进制生成的 HTML 中，避免指向不存在的官方 CDN 文件；官方共享 Markdown/高亮依赖保持不变。

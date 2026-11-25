@@ -108,7 +108,10 @@ jobs:
           cp "$dir"/package/THIRD-PARTY-NOTICES.txt packages/natives/native/THIRD-PARTY-NOTICES.txt
       - name: Regenerate localized export viewer manifest
         working-directory: source
-        run: bun --cwd=packages/collab-web run gen:export-viewer --write
+        run: |
+          bun --cwd=packages/collab-web run gen:export-viewer --write
+          bun ./.zh-build/embed-viewer.ts
+          git diff --check
       - name: Build standalone binary
         working-directory: source
         env:
