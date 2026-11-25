@@ -90,8 +90,8 @@ jobs:
         run: |
           set -euo pipefail
           cp -R ../overlay/localization/zh-CN .zh-build
-          bun test .zh-build/translate.test.ts
-          bun .zh-build/translate.ts
+          bun test ./.zh-build/translate.test.ts
+          bun ./.zh-build/translate.ts
           git diff --check
       - name: Install matching upstream native addon
         working-directory: source
