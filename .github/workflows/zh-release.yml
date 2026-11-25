@@ -105,6 +105,9 @@ jobs:
           npm pack --ignore-scripts --pack-destination "$dir" "@oh-my-pi/pi-natives-$NATIVE@$VERSION"
           tar -xzf "$dir"/*.tgz -C "$dir"
           cp "$dir"/package/*.node packages/natives/native/
+      - name: Regenerate localized export viewer manifest
+        working-directory: source
+        run: bun --cwd=packages/collab-web run gen:export-viewer --write
       - name: Build standalone binary
         working-directory: source
         env:
