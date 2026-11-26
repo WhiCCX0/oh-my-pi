@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { applyEdits, lookup, replaceExactly, transform , settingDisplayValues } from "./translate";
+import { applyEdits, lookup, replaceExactly, transform, staticDisplayCandidates } from "./translate";
 import { rewriteViewer } from "./embed-viewer";
 const dict = { Approve: "批准", Deny: "拒绝", "Use --model": "使用 --model", "Bad --model": "错误", "AI coding assistant": "AI 编程助手" };
 test("only display JSX positions change", () => {
@@ -90,9 +90,12 @@ test("every shipped dictionary entry preserves technical tokens", async () => {
 	const layers = await Promise.all(names.map(async name =>
 		JSON.parse(await readFile(join(import.meta.dir, name), "utf8")) as Record<string, string>
 	));
+	// Base layers must be disjoint; overrides.json intentionally takes precedence.
+	expect(Object.keys(layers[0]).filter(key => Object.hasOwn(layers[1], key))).toEqual([]);
 	const dictionary = Object.assign({}, ...layers) as Record<string, string>;
+	const countBackticks = (value: string) => (value.match(/\x60/g) ?? []).length;
 	const mismatches = Object.entries(dictionary)
-		.filter(([source, translation]) => lookup(dictionary, source) !== translation);
+		.filter(([source, translation]) => lookup(dictionary, source) !== translation || countBackticks(source) !== countBackticks(translation));
 	if (mismatches.length > 0) {
 		throw new Error("Dictionary token mismatches: " + JSON.stringify(mismatches.slice(0, 10)));
 	}
@@ -128,12 +131,11 @@ test("decoded JSX entities translate without changing boundary whitespace", () =
 	expect(transform("<text>&nbsp;Approve &amp; continue</text>;", "ui.tsx", d).count).toBe(0);
 });
 
-test("runtime settings projection collects only display metadata", () => {
-	const values = settingDisplayValues([
-		{ui: {label: "Yolo", description: "Describe", warning: "Risk", options: [{label: "Option", description: "Detail", value: "internal"} as {label: string; description: string}]}},
-		{ui: {label: "Theme", options: "runtime"}}, {},
-	]);
-	expect([...values].sort()).toEqual(["Describe", "Detail", "Option", "Risk", "Theme", "Yolo"]);
+test("static settings candidates retain concatenated, template and cast strings without evaluating modules", () => {
+	const source = 'import "./native-module"; const ui = { label: "Yolo", description: "Part " + "two", warning: `Read ${"this"}`, options: [{label: "Option" as const}] };';
+	const values = staticDisplayCandidates(source, "settings.ts");
+	for (const expected of ["Yolo", "Part two", "Read this", "Option"]) expect(values.has(expected)).toBe(true);
+	expect(values.has("native-module")).toBe(false);
 });
 
 test("viewer rewrite preserves CRLF and accepts comments between checked anchors", () => {

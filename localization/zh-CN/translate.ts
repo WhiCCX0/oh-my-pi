@@ -1,7 +1,6 @@
 import { parse } from "@babel/parser";
 import { readFile, writeFile, readdir } from "node:fs/promises";
-import { join, relative } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, relative, resolve } from "node:path";
 
 type Node = { type: string; start: number; end: number; [key: string]: any };
 type Dictionary = Readonly<Record<string, string>>;
@@ -182,21 +181,56 @@ async function walk(root: string): Promise<string[]> {
 	}
 	return out;
 }
-type DisplayMetadata = {
-	label?: string;
-	description?: string;
-	warning?: string;
-	options?: readonly { label?: string; description?: string }[] | "runtime";
-};
-export function settingDisplayValues(settings: readonly { ui?: DisplayMetadata }[]): Set<string> {
+// No application module is executed on the cross-compilation host. The
+// settings registry imports native-dependent modules even during initialization.
+export function staticDisplayCandidates(source: string, file: string): Set<string> {
 	const values = new Set<string>();
-	const add = (value: string | undefined) => { if (typeof value === "string") values.add(value); };
-	for (const { ui } of settings) {
-		if (!ui) continue;
-		add(ui.label); add(ui.description); add(ui.warning);
-		if (Array.isArray(ui.options)) {
-			for (const option of ui.options) { add(option.label); add(option.description); }
+	function value(node: Node | undefined): string | undefined {
+		if (!node) return;
+		if (node.type === "StringLiteral") return node.value;
+		if (node.type === "TSAsExpression" || node.type === "TSSatisfiesExpression" || node.type === "TSNonNullExpression" || node.type === "ParenthesizedExpression") return value(node.expression);
+		if (node.type === "BinaryExpression" && node.operator === "+") {
+			const left = value(node.left), right = value(node.right);
+			if (left !== undefined && right !== undefined) return left + right;
 		}
+		if (node.type === "TemplateLiteral") {
+			const parts = node.expressions.map((part: Node) => value(part));
+			if (parts.every((part: string | undefined) => part !== undefined) && node.quasis.every((part: Node) => part.value?.cooked != null)) {
+				return node.quasis.map((part: Node, index: number) => part.value.cooked + (parts[index] ?? "")).join("");
+			}
+		}
+	}
+	visit(ast(source, file) as unknown as Node, undefined, node => {
+		const candidate = value(node);
+		if (candidate !== undefined) values.add(candidate);
+	});
+	return values;
+}
+
+async function settingsDictionaryCandidates(root: string): Promise<Set<string>> {
+	const src = join(root, "packages/coding-agent/src");
+	const registry = join(src, "config/all-settings.ts");
+	const source = await readFile(registry, "utf8");
+	const files = new Set<string>([registry]);
+	// Discover the real domain list from the same module used by settings-ui.
+	for (const item of ast(source, registry).program.body) {
+		if (item.type !== "ImportDeclaration" || !item.source.value.startsWith(".")) continue;
+		const target = resolve(dirname(registry), item.source.value.replace(/\.js$/, ""));
+		const candidates = [target.endsWith(".ts") || target.endsWith(".tsx") ? target : target + ".ts", target + ".tsx", join(target, "index.ts")];
+		let found = false;
+		for (const candidate of candidates) {
+			try { await readFile(candidate, "utf8"); files.add(candidate); found = true; break; }
+			catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+		}
+		if (!found) throw new Error("Unable to resolve settings domain " + item.source.value);
+	}
+	// Include helper settings modules, including platform-conditional literals.
+	for (const file of await walk(src)) {
+		if (/(?:^|[/\\])(?:[^/\\]*settings[^/\\]*|registry)\.ts$/.test(file)) files.add(file);
+	}
+	const values = new Set<string>();
+	for (const file of [...files].sort()) {
+		for (const candidate of staticDisplayCandidates(await readFile(file, "utf8"), file)) values.add(candidate);
 	}
 	return values;
 }
@@ -227,10 +261,9 @@ async function main() {
 	const settings = join(root, "packages/coding-agent/src/config/settings-defs.ts");
 	let src = await readFile(settings, "utf8");
 	const validEntries = Object.entries(dict).filter(([k, v]) => k !== v && lookup(dict, k) === v);
-	// The display projection only serves the built-in settings registry. Resolve
-	// actual metadata instead of retaining unrelated UI/CLI strings for life.
-	const registry = await import(pathToFileURL(join(root, "packages/coding-agent/src/config/all-settings.ts")).href);
-	const values = settingDisplayValues(registry.orderedSettings());
+	// Conservatively extract candidates from the actual registry domain sources;
+	// the Windows smoke test proves every actual registered display value.
+	const values = await settingsDictionaryCandidates(root);
 	const entries = validEntries.filter(([key]) => values.has(key));
 	if (entries.length < 100 || entries.length >= validEntries.length) throw new Error("Unexpected settings dictionary coverage: " + entries.length);
 	// An external CI-only proof checks every real Windows registry value against
@@ -277,9 +310,10 @@ async function main() {
 		'\t\tconst full = await Bun.file(dictionaryPath).json();',
 		'\t\tconst { orderedSettings } = await import("./config/all-settings");',
 		'\t\tconst { zhDisplay } = await import("./config/zh-display.generated");',
-		'\t\tlet matched = 0;',
-		'\t\tconst check = (value: unknown) => { if (typeof value !== "string") return; const expected = Object.hasOwn(full, value) ? full[value] : value; if (zhDisplay(value) !== expected) throw new Error("Settings dictionary mismatch: " + value); if (expected !== value) matched++; };',
+		'\t\tlet matched = 0; const missing = new Set<string>();',
+		'\t\tconst check = (value: unknown) => { if (typeof value !== "string") return; const expected = Object.hasOwn(full, value) ? full[value] : value; if (zhDisplay(value) !== expected) missing.add(value); if (expected !== value) matched++; };',
 		'\t\tfor (const { ui } of orderedSettings()) { if (!ui) continue; check(ui.label); check(ui.description); check(ui.warning); if (Array.isArray(ui.options)) for (const option of ui.options) { check(option.label); check(option.description); } }',
+		'\t\tif (missing.size) throw new Error("Settings dictionary mismatches (" + missing.size + "): " + JSON.stringify([...missing].slice(0, 50)));',
 		'\t\tif (matched < 100) throw new Error("Insufficient runtime settings dictionary verification: " + matched);',
 		'\t\tprocess.stdout.write("settings-dictionary-smoke: " + matched + " matches\\n");',
 		'\t}',

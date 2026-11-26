@@ -18,6 +18,7 @@ on:
       - '.github/workflows/zh-build.yml'
 permissions:
   contents: read
+  pull-requests: read
 jobs:
   policy:
     runs-on: ubuntu-22.04
@@ -29,6 +30,7 @@ jobs:
       - name: Test release planning and native provenance policy
         run: |
           set -euo pipefail
+          bash -n localization/zh-CN/resolve-upstream.sh
           python3 localization/zh-CN/release-plan.py --test
           python3 .github/zh-audit/test_verify_native.py
 
