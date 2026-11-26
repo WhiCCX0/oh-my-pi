@@ -1,1 +1,1 @@
-2026-11-26: fresh traced compiler-child evidence for A1/B/C; verified A0, same-run signed EXE packaging and Windows loader checks
+2026-11-26: second-review smoke-receipt-bound signed four-group EXEs with independent A0 verification, r6 overlay and traced compiler evidence
