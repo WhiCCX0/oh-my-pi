@@ -1,0 +1,68 @@
+name: Windows x64 native ISA experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-avx2-experiment
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build A0 / A1 / B / C (Windows x64)
+    if: github.ref == 'refs/heads/experiment/native-avx2'
+    runs-on: vmon-large/from=omp-ci
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check out exact upstream source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: can1357/oh-my-pi
+          ref: v19.2.1
+          path: upstream-source
+          persist-credentials: false
+
+      - name: Compose Bazel cache configuration
+        id: bazel-cache
+        uses: ./.github/actions/bazel-cache
+
+      - name: Verify runner and source pin
+        shell: bash
+        env:
+          OMP_SOURCE_DIR: ${{ github.workspace }}/upstream-source
+        run: |
+          set -euo pipefail
+          test "$(git -C "$OMP_SOURCE_DIR" rev-parse HEAD)" = "b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac"
+          test "$(node -p "require('$OMP_SOURCE_DIR/packages/natives/package.json').version")" = "19.2.1"
+          command -v bun
+          command -v bazelisk
+          command -v npm
+          echo "upstream source: $(git -C "$OMP_SOURCE_DIR" rev-parse HEAD)"
+          echo "bun: $(bun --version)"
+          echo "bazelisk: $(bazelisk --version)"
+          echo "runner VMON_CI: ${VMON_CI:-unset}"
+
+      - name: Build the four experiment groups
+        shell: bash
+        env:
+          OMP_SOURCE_DIR: ${{ github.workspace }}/upstream-source
+          OMP_BAZEL_RC: ${{ steps.bazel-cache.outputs.rc }}
+        run: |
+          set -euo pipefail
+          if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then
+            ulimit -Sn 65536 || true
+          fi
+          bash scripts/native-avx2/build.sh
+
+      - name: Upload native addons and audit evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v8.0.1
+        with:
+          name: native-avx2-v19.2.1-${{ github.run_id }}
+          path: native-avx2-artifacts/
+          if-no-files-found: error
+          retention-days: 30
