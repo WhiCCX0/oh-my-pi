@@ -27,7 +27,6 @@ def edit_file(root: Path, relative: str, replacements: list[tuple[str, str, str]
         after = replace_once(after, old, new, f"{relative}: {label}")
     if after == before:
         raise RuntimeError(f"{relative}: overlay made no change")
-    file.write_text(after, encoding="utf-8", newline="")
     return before, after
 
 
@@ -168,7 +167,11 @@ def main() -> int:
         )
 
     args.evidence.parent.mkdir(parents=True, exist_ok=True)
-    args.evidence.write_text("".join(diffs), encoding="utf-8")
+    patch = "".join(diffs)
+    # Validate all changes first and let git apply the entire patch atomically.
+    subprocess.run(["git", "-C", str(source), "apply", "--check", "-"], input=patch, text=True, check=True)
+    args.evidence.write_text(patch, encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "apply", "-"], input=patch, text=True, check=True)
     print(f"Applied {args.mode} overlay to disposable source {actual}")
     print(f"Patch evidence: {args.evidence}")
     return 0

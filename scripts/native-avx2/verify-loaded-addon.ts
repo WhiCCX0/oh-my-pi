@@ -35,4 +35,6 @@ if (
 }
 
 const sha256 = createHash("sha256").update(fs.readFileSync(status.path)).digest("hex");
+const expectedHash = process.env.EXPECTED_NATIVE_SHA256;
+if (!expectedHash || sha256 !== expectedHash) throw new Error("Loaded addon SHA256 mismatch");
 console.log(JSON.stringify({ ...status, expectedVariant, sha256 }, null, 2));

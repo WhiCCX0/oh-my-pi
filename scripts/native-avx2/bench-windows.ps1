@@ -4,7 +4,7 @@ param(
     [string]$ArtifactsDir,
 
     [ValidateRange(1, 10)]
-    [int]$Rounds = 3,
+    [int]$Rounds = 4,
 
     [ValidateRange(1, 500)]
     [int]$GrepIterations = 50
@@ -101,7 +101,7 @@ if ($bunVersion -ne "1.4.5") { throw "Use Bun 1.4.5 for the pinned experiment; f
 $rgVersion = (& rg --version 2>&1 | Select-Object -First 1 | Out-String).Trim()
 $powerPlan = (& powercfg /getactivescheme 2>&1 | Out-String).Trim()
 
-$resultsDir = Join-Path $artifactRoot "results"
+$resultsDir = Join-Path $artifactRoot ("results-" + $runId)
 New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
 
 $envNames = @(
@@ -110,6 +110,7 @@ $envNames = @(
     "EXPECTED_NATIVE_FILE",
     "EXPECTED_NATIVE_VARIANT",
     "EXPECTED_NATIVE_VERSION",
+    "EXPECTED_NATIVE_SHA256",
     "GREP_BENCH_ITERATIONS",
     "__PI_NATIVE_VARIANT_CACHE"
 )
@@ -156,10 +157,12 @@ try {
     $nativeDir = Join-Path $worktree "packages/natives/native"
     $orders = @(
         @("A0", "A1", "B", "C"),
-        @("B", "C", "A1", "A0"),
+        @("A1", "B", "C", "A0"),
+        @("B", "C", "A0", "A1"),
         @("C", "A0", "A1", "B")
     )
     $runRows = [System.Collections.Generic.List[object]]::new()
+    $grepSignatures = @{}
 
     for ($round = 1; $round -le $Rounds; $round++) {
         $order = $orders[($round - 1) % $orders.Count]
@@ -182,6 +185,7 @@ try {
             $env:EXPECTED_NATIVE_FILE = $group.File
             $env:EXPECTED_NATIVE_VARIANT = $group.Variant
             $env:EXPECTED_NATIVE_VERSION = "19.2.1"
+            $env:EXPECTED_NATIVE_SHA256 = $manifest.experiment.groups[$key].sha256
             $env:GREP_BENCH_ITERATIONS = [string]$GrepIterations
             $env:PI_NATIVES_DIR = Join-Path $env:TEMP ("omp-native-cache-" + $runId + "-" + $key + "-" + $round)
             Remove-Item -LiteralPath $env:PI_NATIVES_DIR -Recurse -Force -ErrorAction SilentlyContinue
@@ -200,16 +204,21 @@ try {
 
             $sha256 = (Get-FileHash -LiteralPath $targetFile -Algorithm SHA256).Hash.ToLowerInvariant()
 
-            & bun packages/natives/bench/text.ts *> $textLog
+            & bun --preload ./scripts/native-avx2/verify-loaded-addon.ts packages/natives/bench/text.ts *> $textLog
             if ($LASTEXITCODE -ne 0) {
                 throw "Text benchmark failed for $key. See $textLog"
             }
 
-            & bun packages/natives/bench/grep.ts *> $grepLog
+            & bun --preload ./scripts/native-avx2/verify-loaded-addon.ts packages/natives/bench/grep.ts *> $grepLog
             if ($LASTEXITCODE -ne 0) {
                 throw "Grep benchmark failed for $key. See $grepLog"
             }
 
+            $matches = @([regex]::Matches((Get-Content -Raw -LiteralPath $grepLog), '(?m)Native grep:\s+[^\r\n]*\((\d+) (?:files|matches)\)') | ForEach-Object { $_.Groups[1].Value })
+            if ($matches.Count -eq 0) { throw "Missing grep correctness metrics for $key" }
+            $signature = $matches -join ','
+            if ($grepSignatures.ContainsKey($round) -and $grepSignatures[$round] -ne $signature) { throw "Grep correctness mismatch in round $round for $key" }
+            $grepSignatures[$round] = $signature
             $runRows.Add([pscustomobject]@{
                 Round = $round
                 Group = $key
@@ -245,7 +254,7 @@ try {
     }
     $metadata | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 -Path (Join-Path $resultsDir "environment.json")
 
-    $zipPath = Join-Path $artifactRoot "native-avx2-results.zip"
+    $zipPath = Join-Path $artifactRoot ("native-avx2-results-" + $runId + ".zip")
     Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $resultsDir "*") -DestinationPath $zipPath -CompressionLevel Optimal -Force
 

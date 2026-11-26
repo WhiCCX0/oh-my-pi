@@ -5,8 +5,7 @@ on:
   push:
     branches: [experiment/native-avx2]
     paths:
-      - 'scripts/native-avx2/**'
-      - '.github/workflows/native-avx2-experiment.yml'
+      - 'scripts/native-avx2/rebuild-request.txt'
 
 permissions:
   contents: read
@@ -23,12 +22,14 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Check out exact upstream source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: can1357/oh-my-pi
-          ref: v19.2.1
+          ref: b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
           path: upstream-source
           persist-credentials: false
 
@@ -40,9 +41,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v bazelisk >/dev/null; then
-            npm install --global @bazel/bazelisk
-          fi
+          install_dir="$RUNNER_TEMP/pinned-bazelisk"
+          mkdir -p "$install_dir"
+          curl --fail --location --retry 3 https://github.com/bazelbuild/bazelisk/releases/download/v1.30.0/bazelisk-linux-amd64 -o "$install_dir/bazelisk"
+          echo "a248ae2b2b62b5baebb748f6fba7203bff1a27e5d01b55399a8406744cb539e8  $install_dir/bazelisk" | sha256sum -c -
+          chmod +x "$install_dir/bazelisk"
+          echo "$install_dir" >> "$GITHUB_PATH"
           mkdir -p "$HOME/.cache/omp-avx2-disk"
           printf 'common --disk_cache=%s\n' "$HOME/.cache/omp-avx2-disk" > "$RUNNER_TEMP/omp-avx2.bazelrc"
           df -h
@@ -63,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C "$OMP_SOURCE_DIR" rev-parse HEAD)" = "b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac"
-          test "$(node -p "require('$OMP_SOURCE_DIR/packages/natives/package.json').version")" = "19.2.1"
+          test "$(node -p 'require(process.argv[1]).version' "$OMP_SOURCE_DIR/packages/natives/package.json")" = "19.2.1"
           command -v bun
           command -v bazelisk
           command -v npm

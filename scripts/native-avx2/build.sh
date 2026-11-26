@@ -23,23 +23,44 @@ test -d "$SOURCE/.git" || fail "upstream source is not a git checkout: $SOURCE"
 
 SOURCE_SHA="$(git -C "$SOURCE" rev-parse HEAD)"
 [[ "$SOURCE_SHA" == "$EXPECTED_SOURCE_SHA" ]] || fail "wrong upstream source SHA: $SOURCE_SHA"
-SOURCE_VERSION="$(node -p "require('$SOURCE/packages/natives/package.json').version")"
+SOURCE_VERSION="$(node -p 'require(process.argv[1]).version' "$SOURCE/packages/natives/package.json")"
 [[ "$SOURCE_VERSION" == "$VERSION" ]] || fail "wrong natives package version: $SOURCE_VERSION"
 
-rm -rf "$ARTIFACTS"
-mkdir -p "$ARTIFACTS"
+git -C "$SOURCE" diff --quiet && git -C "$SOURCE" diff --cached --quiet || fail "Upstream source has tracked modifications; use a fresh checkout"
+ARTIFACTS="$(realpath -m -- "$ARTIFACTS")"
+[[ "$ARTIFACTS" == "$ROOT/native-avx2-artifacts" ]] || fail "Refusing unexpected output directory: $ARTIFACTS"
+[[ ! -e "$ARTIFACTS" && ! -L "$ARTIFACTS" ]] || fail "Output already exists; move it aside explicitly: $ARTIFACTS"
+mkdir -- "$ARTIFACTS"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "=== A0: official npm baseline ==="
 mkdir -p "$ARTIFACTS/A0-official-baseline"
-npm pack --ignore-scripts --json --pack-destination "$TMP" "@oh-my-pi/pi-natives-win32-x64@$VERSION" > "$TMP/npm-pack.json"
+npm pack --registry=https://registry.npmjs.org --ignore-scripts --json --pack-destination "$TMP" "@oh-my-pi/pi-natives-win32-x64@$VERSION" > "$TMP/npm-pack.json"
 TARBALL="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(p[0].filename)' "$TMP/npm-pack.json")"
-test -n "$TARBALL" || fail "npm pack returned no tarball"
+[[ "$TARBALL" =~ ^[A-Za-z0-9._-]+\.tgz$ ]] || fail "npm pack returned an unsafe tarball name"
 INTEGRITY="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))[0].integrity' "$TMP/npm-pack.json")"
 [[ "$INTEGRITY" == "sha512-$(openssl dgst -sha512 -binary "$TMP/$TARBALL" | openssl base64 -A)" ]] || fail "A0 npm tarball integrity mismatch"
-tar -xzf "$TMP/$TARBALL" -C "$TMP"
+python3 - "$TMP/$TARBALL" "$TMP" <<'PY'
+import pathlib, shutil, sys, tarfile
+root = pathlib.Path(sys.argv[2]) / "package"
+root.mkdir()
+with tarfile.open(sys.argv[1], "r:gz") as tar:
+    seen = set()
+    for item in tar.getmembers():
+        path = pathlib.PurePosixPath(item.name)
+        if path.is_absolute() or "\\" in item.name or ".." in path.parts or not path.parts or path.parts[0] != "package":
+            raise ValueError("Unsafe native archive path: " + item.name)
+        if not (item.isfile() or item.isdir()) or item.name in seen:
+            raise ValueError("Unsafe or duplicate member: " + item.name)
+        seen.add(item.name)
+        if item.name in ("package/package.json", "package/pi_natives.win32-x64-baseline.node", "package/THIRD-PARTY-NOTICES.txt"):
+            if not item.isfile() or item.size <= 0:
+                raise ValueError("Expected regular nonempty file: " + item.name)
+            with tar.extractfile(item) as source, (root / path.name).open("wb") as target:
+                shutil.copyfileobj(source, target)
+PY
 node - "$TMP/package/package.json" <<'NODE'
 const p = require(process.argv[2]);
 if (p.name !== "@oh-my-pi/pi-natives-win32-x64" || p.version !== "19.2.1") {
@@ -73,6 +94,12 @@ verify_stamp() {
 }
 
 echo "=== A1: self-built upstream baseline ==="
+(
+  cd "$SOURCE"
+  bazelisk --bazelrc="$OMP_BAZEL_RC" aquery --output=jsonproto --include_commandline --include_param_files \
+    'mnemonic("Rustc|CppCompile", deps(//:natives-win32-x64-baseline))'
+) > "$ARTIFACTS/aquery-A1-baseline.json"
+python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$ARTIFACTS/aquery-A1-baseline.json" --variant baseline --codegen-units 16
 build_native "win32-x64-baseline" "$ARTIFACTS/A1-self-built-baseline"
 A1_FILE="$ARTIFACTS/A1-self-built-baseline/pi_natives.win32-x64-baseline.node"
 verify_stamp "$A1_FILE"
@@ -84,20 +111,20 @@ python3 "$ROOT/scripts/native-avx2/apply-overlay.py" \
 run_isa_gate() {
   local label="$1"
   local cgu="$2"
-  local query_out="$ARTIFACTS/aquery-$label.txt"
+  local query_out="$ARTIFACTS/aquery-$label.json"
   (
     cd "$SOURCE"
     bazelisk --bazelrc="$OMP_BAZEL_RC" aquery \
-      --output=text --include_commandline --include_param_files \
+      --output=jsonproto --include_commandline --include_param_files \
       'mnemonic("Rustc|CppCompile", deps(//:natives-win32-x64-modern))'
   ) > "$query_out"
-  python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$query_out" --codegen-units "$cgu"
+  python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$query_out" --variant modern --codegen-units "$cgu"
 
   local output_base wrapper
   output_base="$(cd "$SOURCE" && bazelisk --bazelrc="$OMP_BAZEL_RC" info output_base)"
   wrapper="$output_base/external/+msvc_cc_repository+msvc_cc/bin/clang-cl"
   test -s "$wrapper" || fail "generated clang-cl wrapper not found: $wrapper"
-  grep -Fq -- "-march=x86-64-v3" "$wrapper" || fail "clang-cl wrapper lacks -march=x86-64-v3"
+  sed -n '/^exec "\$llvm\/bin\/clang-cl"/,$p' "$wrapper" | grep -Eq '^[[:space:]]*/clang:-march=x86-64-v3[[:space:]]*\\[[:space:]]*$' || fail "clang-cl executable command lacks v3 flag"
   cp "$wrapper" "$ARTIFACTS/clang-cl-$label.sh"
 }
 
@@ -117,9 +144,11 @@ build_native "win32-x64-modern" "$ARTIFACTS/C-v3-thin-cgu1"
 C_FILE="$ARTIFACTS/C-v3-thin-cgu1/pi_natives.win32-x64-modern.node"
 verify_stamp "$C_FILE"
 
-echo "=== Verify modern-only embedding ==="
-OMP_SOURCE_DIR="$SOURCE" bun "$ROOT/scripts/native-avx2/verify-embed.ts" "$ARTIFACTS/B-v3-thin-cgu16"
-OMP_SOURCE_DIR="$SOURCE" bun "$ROOT/scripts/native-avx2/verify-embed.ts" "$ARTIFACTS/C-v3-thin-cgu1"
+echo "=== Verify isolated baseline and modern embedding ==="
+OMP_SOURCE_DIR="$SOURCE" bun "$ROOT/scripts/native-avx2/verify-embed.ts" "$ARTIFACTS/A0-official-baseline" baseline
+OMP_SOURCE_DIR="$SOURCE" bun "$ROOT/scripts/native-avx2/verify-embed.ts" "$ARTIFACTS/A1-self-built-baseline" baseline
+OMP_SOURCE_DIR="$SOURCE" bun "$ROOT/scripts/native-avx2/verify-embed.ts" "$ARTIFACTS/B-v3-thin-cgu16" modern
+OMP_SOURCE_DIR="$SOURCE" bun "$ROOT/scripts/native-avx2/verify-embed.ts" "$ARTIFACTS/C-v3-thin-cgu1" modern
 
 (
   cd "$ARTIFACTS"

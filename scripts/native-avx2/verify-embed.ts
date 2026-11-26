@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [nativeDirArg] = process.argv.slice(2);
+const [nativeDirArg, variant = "modern"] = process.argv.slice(2);
+if (!["baseline", "modern"].includes(variant)) throw new Error("Invalid expected variant");
+const expected = "pi_natives.win32-x64-" + variant + ".node";
 const sourceDir = process.env.OMP_SOURCE_DIR;
 if (!nativeDirArg || !sourceDir) {
   throw new Error("Usage: OMP_SOURCE_DIR=<v19.2.1 checkout> bun verify-embed.ts <native-dir>");
@@ -11,8 +13,8 @@ if (!nativeDirArg || !sourceDir) {
 
 const nativeDir = path.resolve(nativeDirArg);
 const addonFiles = (await fs.readdir(nativeDir)).filter(name => name.endsWith(".node"));
-if (addonFiles.length !== 1 || addonFiles[0] !== "pi_natives.win32-x64-modern.node") {
-  throw new Error("Expected exactly one modern addon in " + nativeDir + "; found: " + (addonFiles.join(", ") || "(none)"));
+if (addonFiles.length !== 1 || addonFiles[0] !== expected) {
+  throw new Error("Expected exactly one selected addon in " + nativeDir + "; found: " + (addonFiles.join(", ") || "(none)"));
 }
 
 const moduleUrl = pathToFileURL(
@@ -29,13 +31,18 @@ const overrides = await embeddedAddonFiles({
 const zstdFiles = Object.keys(overrides).filter(name => name.endsWith(".node.zst"));
 if (
   zstdFiles.length !== 1 ||
-  !zstdFiles[0].endsWith("pi_natives.win32-x64-modern.node.zst")
+  !zstdFiles[0].endsWith(expected + ".zst")
 ) {
   throw new Error("Single-modern embedding check failed: " + zstdFiles.join(", "));
 }
 const manifest = Object.entries(overrides).find(([name]) => name.endsWith("embedded-addon.js"))?.[1];
-if (typeof manifest !== "string" || !manifest.includes('variant: "modern"') || manifest.includes('variant: "baseline"')) {
+if (typeof manifest !== "string" || !manifest.includes("variant: " + JSON.stringify(variant)) || manifest.includes("variant: " + JSON.stringify(variant === "modern" ? "baseline" : "modern"))) {
   throw new Error("Generated embedded-addon.js does not describe a modern-only addon");
 }
 
-console.log(JSON.stringify({ nativeDir, addonFiles, zstdFiles, singleModernEmbedding: true }, null, 2));
+const frame = overrides[zstdFiles[0]];
+if (!(frame instanceof Uint8Array)) throw new Error("Missing compressed addon bytes");
+const original = await fs.readFile(path.join(nativeDir, expected));
+const decoded = Buffer.from(await Bun.zstdDecompress(frame));
+if (!decoded.equals(original)) throw new Error("Embedded bytes differ from selected addon");
+console.log(JSON.stringify({ nativeDir, addonFiles, zstdFiles, variant, exactEmbedding: true }, null, 2));
