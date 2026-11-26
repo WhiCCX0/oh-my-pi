@@ -93,6 +93,24 @@ verify_stamp() {
   grep -aFq "PI_NATIVES_VERSION_STAMP:$VERSION" "$file" || fail "addon is missing its $VERSION post-link stamp: $file"
 }
 
+check_wrapper() {
+  local variant="$1"
+  local output_base wrapper exec_body
+  output_base="$(cd "$SOURCE" && bazelisk --bazelrc="$OMP_BAZEL_RC" info output_base)"
+  wrapper="$output_base/external/+msvc_cc_repository+msvc_cc/bin/clang-cl"
+  test -s "$wrapper" || fail "generated clang-cl wrapper not found: $wrapper"
+  exec_body="$(sed -n '/^exec "\$llvm\/bin\/clang-cl"/,$p' "$wrapper")"
+  [[ -n "$exec_body" ]] || fail "clang-cl wrapper lacks executable invocation"
+  if [[ "$variant" == baseline ]]; then
+    grep -Eq '^[[:space:]]*-msse4\.1[[:space:]]*\\[[:space:]]*$' <<< "$exec_body" || fail "baseline wrapper lacks SSE4.1"
+    grep -Eq '^[[:space:]]*-msse4\.2[[:space:]]*\\[[:space:]]*$' <<< "$exec_body" || fail "baseline wrapper lacks SSE4.2"
+    if grep -Eq -- '(-march=x86-64-v[34]|/arch:AVX)' <<< "$exec_body"; then fail "baseline wrapper contains higher ISA"; fi
+  else
+    grep -Eq '^[[:space:]]*/clang:-march=x86-64-v3[[:space:]]*\\[[:space:]]*$' <<< "$exec_body" || fail "modern wrapper lacks v3"
+  fi
+  cp "$wrapper" "$ARTIFACTS/clang-cl-$variant.sh"
+}
+
 echo "=== A1: self-built upstream baseline ==="
 (
   cd "$SOURCE"
@@ -100,6 +118,7 @@ echo "=== A1: self-built upstream baseline ==="
     'mnemonic("Rustc|CppCompile", deps(//:natives-win32-x64-baseline))'
 ) > "$ARTIFACTS/aquery-A1-baseline.json"
 python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$ARTIFACTS/aquery-A1-baseline.json" --variant baseline --codegen-units 16
+check_wrapper baseline
 build_native "win32-x64-baseline" "$ARTIFACTS/A1-self-built-baseline"
 A1_FILE="$ARTIFACTS/A1-self-built-baseline/pi_natives.win32-x64-baseline.node"
 verify_stamp "$A1_FILE"
@@ -120,12 +139,8 @@ run_isa_gate() {
   ) > "$query_out"
   python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$query_out" --variant modern --codegen-units "$cgu"
 
-  local output_base wrapper
-  output_base="$(cd "$SOURCE" && bazelisk --bazelrc="$OMP_BAZEL_RC" info output_base)"
-  wrapper="$output_base/external/+msvc_cc_repository+msvc_cc/bin/clang-cl"
-  test -s "$wrapper" || fail "generated clang-cl wrapper not found: $wrapper"
-  sed -n '/^exec "\$llvm\/bin\/clang-cl"/,$p' "$wrapper" | grep -Eq '^[[:space:]]*/clang:-march=x86-64-v3[[:space:]]*\\[[:space:]]*$' || fail "clang-cl executable command lacks v3 flag"
-  cp "$wrapper" "$ARTIFACTS/clang-cl-$label.sh"
+  check_wrapper modern
+  cp "$ARTIFACTS/clang-cl-modern.sh" "$ARTIFACTS/clang-cl-$label.sh"
 }
 
 echo "=== B: full target-graph v3, ThinLTO, CGU=16 ==="

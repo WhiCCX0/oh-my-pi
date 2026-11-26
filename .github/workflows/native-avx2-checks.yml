@@ -1,0 +1,37 @@
+name: Native experiment static verification
+on:
+  push:
+    branches: [experiment/native-avx2]
+    paths:
+      - 'scripts/native-avx2/**'
+      - '.github/workflows/native-avx2-checks.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Syntax and unit tests
+        run: |
+          set -euo pipefail
+          bash -n scripts/native-avx2/build.sh
+          python3 -m py_compile scripts/native-avx2/*.py
+          python3 scripts/native-avx2/test-aquery.py
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: can1357/oh-my-pi
+          ref: b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          path: source
+          persist-credentials: false
+      - name: Apply both overlays to disposable source
+        run: |
+          set -euo pipefail
+          python3 scripts/native-avx2/apply-overlay.py --source source --mode modern --evidence "$RUNNER_TEMP/modern.patch"
+          python3 scripts/native-avx2/apply-overlay.py --source source --mode cgu1 --evidence "$RUNNER_TEMP/cgu1.patch"
+          git -C source diff --check
+          test -s "$RUNNER_TEMP/modern.patch"
+          test -s "$RUNNER_TEMP/cgu1.patch"

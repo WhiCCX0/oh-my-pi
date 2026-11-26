@@ -50,11 +50,11 @@ def inspect(graph, variant, cgu):
         mnemonic = action["mnemonic"]
         if mnemonic not in ("Rustc", "CppCompile"):
             continue
-        args = expanded_args(action)
         label = labels.get(str(action["targetId"]), "<unknown>")
         config = configs.get(str(action.get("configurationId")), {})
         if config.get("isTool"):
             continue
+        args = expanded_args(action)
         if mnemonic == "CppCompile":
             if not any("msvc_cc" in arg and "clang-cl" in arg for arg in args):
                 if "win32-x64" in config.get("platformName", ""):
@@ -78,6 +78,8 @@ def inspect(graph, variant, cgu):
         helper = label.endswith("//crates/natives:oauth_callback_relay")
         root = label.endswith("//crates/natives:pi_natives")
         root_count += int(root)
+        if root and codegen(args, "lto")[-1:] != ["thin"]:
+            errors.append(label + ": final addon does not explicitly carry ThinLTO")
         expected_units = "1" if helper else str(cgu)
         if not units or units[-1] != expected_units:
             errors.append(f"{label}: CGU {units}, expected {expected_units}")
