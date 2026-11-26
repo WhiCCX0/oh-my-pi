@@ -35,12 +35,12 @@ test("critical anchors fail closed", () => {
 test("JSX safely encodes quotes, backslashes, newlines and markup", () => {
 	const special = {
 		"Title marker": '他说："C:\\temp"\n继续',
-		"Text marker": "显示 <标签> {value}",
+		"Text marker {value}": "显示 <标签> {value}",
 	};
-	const result = transform('<item title="Title marker">Text marker</item>;', "packages/coding-agent/src/ui/test.tsx", special);
+	const result = transform('<item title="Title marker">Text marker {value}</item>;', "packages/coding-agent/src/ui/test.tsx", special);
 	expect(result.count).toBe(2);
 	expect(result.source).toContain("title={" + JSON.stringify(special["Title marker"]) + "}");
-	expect(result.source).toContain("{" + JSON.stringify(special["Text marker"]) + "}");
+	expect(result.source).toContain("{" + JSON.stringify(special["Text marker {value}"]) + "}");
 });
 
 test("URL sentence punctuation and balanced delimiters are normalized", () => {
