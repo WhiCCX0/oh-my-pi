@@ -1,0 +1,31 @@
+name: Chinese overlay policy regression checks
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/zh-audit-checks.yml'
+      - '.github/zh-audit/**'
+      - 'localization/zh-CN/**'
+      - '.github/workflows/zh-release.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/zh-audit-checks.yml'
+      - '.github/zh-audit/**'
+      - 'localization/zh-CN/**'
+      - '.github/workflows/zh-release.yml'
+permissions:
+  contents: read
+jobs:
+  policy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Test release planning and native provenance policy
+        run: |
+          set -euo pipefail
+          python3 localization/zh-CN/release-plan.py --test
+          python3 .github/zh-audit/test_verify_native.py
