@@ -114,3 +114,9 @@ test("ordered printf and numeric/dotted placeholders", () => {
 	const url = "(see https://example.com.)";
 	expect(lookup({[url]: "参见 https://example.com"}, url)).toBe("参见 https://example.com");
 });
+
+test("CLI angle-bracket arguments retain their exact spelling", () => {
+	const source = "Use /rename <title>";
+	expect(lookup({[source]: "使用 /rename <标题>"}, source)).toBe(source);
+	expect(lookup({[source]: "使用 /rename <title>"}, source)).toBe("使用 /rename <title>");
+});

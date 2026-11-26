@@ -12,6 +12,7 @@ const headings: Dictionary = { USAGE: "用法", COMMANDS: "命令", ARGUMENTS: "
 const URL_PATTERN = /https?:\/\/[^\s"'`<>。，；：！？、）】》」』]*/giu;
 const URL_TRAILING_PUNCTUATION = /[.,;:!?。，；：！？、）】》」』]+$/u;
 const TOKEN_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+	["argument", /<[A-Za-z][A-Za-z0-9_.|:-]*(?:\.\.\.)?>/g],
 	["flag", /(?<![\w-])--[A-Za-z][A-Za-z0-9-]*/g],
 	["printf", /%(?:\d+\$)?[-+#0]*(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|z|t|j|L)?[diuoxXfFeEgGaAcspnOj%]/g],
 	["placeholder", /\{\{[^{}]+\}\}|\$\{[^{}]+\}|\{(?:[0-9]+|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\}/g],
@@ -218,6 +219,12 @@ async function main() {
 	src = replaceExactly(src, "export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {",
 		"export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {\n\tif (process.env.PI_COMPILED === \"true\") { const reason = " + JSON.stringify(reason) + "; console.log(reason); return { kind: \"unsupported\", reason }; }", update);
 	ast(src, update); await writeFile(update, src);
+	// Compiled localized builds must not advertise the disabled official updater.
+	const startup = join(root, "packages/coding-agent/src/main.ts");
+	src = await readFile(startup, "utf8");
+	src = replaceExactly(src, "async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {",
+		"async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {\n\tif (process.env.PI_COMPILED === \"true\") return;", startup);
+	ast(src, startup); await writeFile(startup, src);
 	if (count < 50) throw new Error("Localization coverage unexpectedly low: " + count);
 	console.log(JSON.stringify({ translatedLiterals: count, modifiedFiles: modified, dictionaryEntries: Object.keys(dict).length }));
 }

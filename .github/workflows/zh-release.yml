@@ -147,7 +147,7 @@ jobs:
           (
             cd "$dir"
             printf '{"private":true,"name":"native-verification","version":"1.0.0"}\n' > package.json
-            npm install --package-lock-only --ignore-scripts --no-audit --no-fund --os=win32 --cpu=x64 --save-exact "$package"
+            npm install --package-lock-only --force --ignore-scripts --no-audit --no-fund --save-exact "$package"
             npm audit signatures --json --include-attestations > audit.json
             npm pack --ignore-scripts --json "$package" > pack.json
           )
