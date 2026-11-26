@@ -1,6 +1,7 @@
 import { parse } from "@babel/parser";
 import { readFile, writeFile, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 
 type Node = { type: string; start: number; end: number; [key: string]: any };
 type Dictionary = Readonly<Record<string, string>>;
@@ -122,8 +123,13 @@ export function transform(source: string, file: string, dict: Dictionary) {
 		if (jsx && node.type === "JSXText") {
 			const original = source.slice(node.start, node.end);
 			const trimmed = original.trim();
-			const translated = lookup(dict, trimmed);
-			if (trimmed && translated !== trimmed) {
+			const decoded = String(node.value);
+			const display = decoded.trim();
+			// Babel decodes HTML entities. Keep raw surrounding whitespace, and
+			// skip ambiguous whitespace entities at the boundaries.
+			const edges = (value: string) => [value.slice(0, value.length - value.trimStart().length), value.slice(value.trimEnd().length)];
+			const translated = lookup(dict, display);
+			if (trimmed && display && translated !== display && JSON.stringify(edges(original)) === JSON.stringify(edges(decoded))) {
 				const start = node.start + original.indexOf(trimmed);
 				edits.push({ start, end: start + trimmed.length, text: "{" + JSON.stringify(translated) + "}" });
 			}
@@ -176,6 +182,24 @@ async function walk(root: string): Promise<string[]> {
 	}
 	return out;
 }
+type DisplayMetadata = {
+	label?: string;
+	description?: string;
+	warning?: string;
+	options?: readonly { label?: string; description?: string }[] | "runtime";
+};
+export function settingDisplayValues(settings: readonly { ui?: DisplayMetadata }[]): Set<string> {
+	const values = new Set<string>();
+	const add = (value: string | undefined) => { if (typeof value === "string") values.add(value); };
+	for (const { ui } of settings) {
+		if (!ui) continue;
+		add(ui.label); add(ui.description); add(ui.warning);
+		if (Array.isArray(ui.options)) {
+			for (const option of ui.options) { add(option.label); add(option.description); }
+		}
+	}
+	return values;
+}
 async function main() {
 	const root = process.cwd();
 	const dict: Dictionary = {
@@ -202,7 +226,18 @@ async function main() {
 	// Translate only the settings display projection, not persisted values.
 	const settings = join(root, "packages/coding-agent/src/config/settings-defs.ts");
 	let src = await readFile(settings, "utf8");
-	const entries = Object.entries(dict).filter(([k, v]) => k !== v && lookup(dict, k) === v);
+	const validEntries = Object.entries(dict).filter(([k, v]) => k !== v && lookup(dict, k) === v);
+	// The display projection only serves the built-in settings registry. Resolve
+	// actual metadata instead of retaining unrelated UI/CLI strings for life.
+	const registry = await import(pathToFileURL(join(root, "packages/coding-agent/src/config/all-settings.ts")).href);
+	const values = settingDisplayValues(registry.orderedSettings());
+	const entries = validEntries.filter(([key]) => values.has(key));
+	if (entries.length < 100 || entries.length >= validEntries.length) throw new Error("Unexpected settings dictionary coverage: " + entries.length);
+	// An external CI-only proof checks every real Windows registry value against
+	// the full dictionary without embedding the full dictionary in the EXE.
+	const proof = process.env.OMP_ZH_SMOKE_DICTIONARY_OUT;
+	if (proof) await writeFile(proof, JSON.stringify(Object.fromEntries(validEntries)));
+	console.log(JSON.stringify({ runtimeDictionaryEntries: entries.length, fullDictionaryEntries: validEntries.length, runtimeDictionaryBytes: Buffer.byteLength(JSON.stringify(entries)), fullDictionaryBytes: Buffer.byteLength(JSON.stringify(validEntries)) }));
 	await writeFile(join(root, "packages/coding-agent/src/config/zh-display.generated.ts"),
 		"// Generated at build time.\nconst entries = new Map<string, string>(" + JSON.stringify(entries) + ");\n" +
 		"export function zhDisplay(value: string): string { return entries.get(value) ?? value; }\n");
@@ -237,6 +272,17 @@ async function main() {
 		'\tconst defs = getAllSettingDefs([{ path: "audit.setting", type: "enum", defaultValue: "yolo", enumValues: ["yolo"], ui: { tab: "interaction", label: "Yolo", description: "Yolo", options: [{ value: "yolo", label: "Yolo" }] } }]);',
 		'\tconst def = defs[0];',
 		'\tif (!def || def.path !== "audit.setting" || def.defaultValue !== "yolo" || def.label !== "Yolo（全自动）" || def.description !== "Yolo（全自动）" || def.type !== "submenu" || def.options[0]?.value !== "yolo" || def.options[0]?.label !== "Yolo（全自动）") throw new Error("Localized settings projection failed");',
+		'\tconst dictionaryPath = process.env.OMP_ZH_SMOKE_DICTIONARY;',
+		'\tif (dictionaryPath) {',
+		'\t\tconst full = await Bun.file(dictionaryPath).json();',
+		'\t\tconst { orderedSettings } = await import("./config/all-settings");',
+		'\t\tconst { zhDisplay } = await import("./config/zh-display.generated");',
+		'\t\tlet matched = 0;',
+		'\t\tconst check = (value: unknown) => { if (typeof value !== "string") return; const expected = Object.hasOwn(full, value) ? full[value] : value; if (zhDisplay(value) !== expected) throw new Error("Settings dictionary mismatch: " + value); if (expected !== value) matched++; };',
+		'\t\tfor (const { ui } of orderedSettings()) { if (!ui) continue; check(ui.label); check(ui.description); check(ui.warning); if (Array.isArray(ui.options)) for (const option of ui.options) { check(option.label); check(option.description); } }',
+		'\t\tif (matched < 100) throw new Error("Insufficient runtime settings dictionary verification: " + matched);',
+		'\t\tprocess.stdout.write("settings-dictionary-smoke: " + matched + " matches\\n");',
+		'\t}',
 		'\tprocess.stdout.write("localization-smoke: ok\\n");',
 	].join("\n");
 	src = replaceExactly(src, smokeAnchor, smokeChecks + "\n" + smokeAnchor, cliSource);

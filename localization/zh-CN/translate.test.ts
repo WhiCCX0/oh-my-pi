@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { applyEdits, lookup, replaceExactly, transform } from "./translate";
+import { applyEdits, lookup, replaceExactly, transform , settingDisplayValues } from "./translate";
+import { rewriteViewer } from "./embed-viewer";
 const dict = { Approve: "批准", Deny: "拒绝", "Use --model": "使用 --model", "Bad --model": "错误", "AI coding assistant": "AI 编程助手" };
 test("only display JSX positions change", () => {
 	const source = 'const x = <item key="Approve" id="Deny" label="Approve" onAction={() => "Deny"}>{ok ? "Approve" : "Deny"}</item>; const y = id === "Approve";';
@@ -119,4 +120,39 @@ test("CLI angle-bracket arguments retain their exact spelling", () => {
 	const source = "Use /rename <title>";
 	expect(lookup({[source]: "使用 /rename <标题>"}, source)).toBe(source);
 	expect(lookup({[source]: "使用 /rename <title>"}, source)).toBe("使用 /rename <title>");
+});
+
+test("decoded JSX entities translate without changing boundary whitespace", () => {
+	const d = {"Approve & continue": "批准并继续"};
+	expect(transform("<text> Approve &amp; continue </text>;", "ui.tsx", d).source).toContain(' {"批准并继续"} ');
+	expect(transform("<text>&nbsp;Approve &amp; continue</text>;", "ui.tsx", d).count).toBe(0);
+});
+
+test("runtime settings projection collects only display metadata", () => {
+	const values = settingDisplayValues([
+		{ui: {label: "Yolo", description: "Describe", warning: "Risk", options: [{label: "Option", description: "Detail", value: "internal"} as {label: string; description: string}]}},
+		{ui: {label: "Theme", options: "runtime"}}, {},
+	]);
+	expect([...values].sort()).toEqual(["Describe", "Detail", "Option", "Risk", "Theme", "Yolo"]);
+});
+
+test("viewer rewrite preserves CRLF and accepts comments between checked anchors", () => {
+	const fixture = [
+		'import viewerAsset from "./viewer.generated.json" with { type: "json" };',
+		'let viewerScript: string; declare const viewer: string; declare const sourceCheckout: boolean;',
+		'if (sourceCheckout) {',
+		'  const escaped = viewer.replace(/x/g, "y");',
+		'  viewerScript = `<script>window.addEventListener("DOMContentLoaded",function(){${escaped}});</script>`;',
+		'} else {',
+		'  const viewerUrl = "https://build.stencil.so/web/omp/fixture";',
+		'  // retained layout comment',
+		'  viewerScript = `<script src="${viewerUrl}"></script>`;',
+		'}',
+	].join("\r\n");
+	const result = rewriteViewer(fixture, "fixture.ts");
+	expect(result).toContain("zhViewer.replace(");
+	expect(result).toContain("// retained layout comment");
+	expect(result).not.toContain("https://build.stencil.so/web/omp/");
+	expect(result.replaceAll("\r\n", "")).not.toContain("\n");
+	expect(() => rewriteViewer(fixture.replace("viewerUrl =", "unexpected ="), "fixture.ts")).toThrow();
 });
