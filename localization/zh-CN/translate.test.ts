@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import { applyEdits, lookup, replaceExactly, transform } from "./translate";
+import { applyEdits, lookup, replaceExactly, transform, renderRuntimeDictionary } from "./translate";
+import { rewriteViewer } from "./embed-viewer";
 const dict = { Approve: "批准", Deny: "拒绝", "Use --model": "使用 --model", "Bad --model": "错误", "AI coding assistant": "AI 编程助手" };
 test("only display JSX positions change", () => {
 	const source = 'const x = <item key="Approve" id="Deny" label="Approve" onAction={() => "Deny"}>{ok ? "Approve" : "Deny"}</item>; const y = id === "Approve";';
@@ -89,9 +92,12 @@ test("every shipped dictionary entry preserves technical tokens", async () => {
 	const layers = await Promise.all(names.map(async name =>
 		JSON.parse(await readFile(join(import.meta.dir, name), "utf8")) as Record<string, string>
 	));
+	// Base layers must be disjoint; overrides.json intentionally takes precedence.
+	expect(Object.keys(layers[0]).filter(key => Object.hasOwn(layers[1], key))).toEqual([]);
 	const dictionary = Object.assign({}, ...layers) as Record<string, string>;
+	const countBackticks = (value: string) => (value.match(/\x60/g) ?? []).length;
 	const mismatches = Object.entries(dictionary)
-		.filter(([source, translation]) => lookup(dictionary, source) !== translation);
+		.filter(([source, translation]) => lookup(dictionary, source) !== translation || countBackticks(source) !== countBackticks(translation));
 	if (mismatches.length > 0) {
 		throw new Error("Dictionary token mismatches: " + JSON.stringify(mismatches.slice(0, 10)));
 	}
@@ -119,4 +125,52 @@ test("CLI angle-bracket arguments retain their exact spelling", () => {
 	const source = "Use /rename <title>";
 	expect(lookup({[source]: "使用 /rename <标题>"}, source)).toBe(source);
 	expect(lookup({[source]: "使用 /rename <title>"}, source)).toBe("使用 /rename <title>");
+});
+
+test("decoded JSX entities translate without changing boundary whitespace", () => {
+	const d = {"Approve & continue": "批准并继续"};
+	expect(transform("<text> Approve &amp; continue </text>;", "ui.tsx", d).source).toContain(' {"批准并继续"} ');
+	expect(transform("<text>&nbsp;Approve &amp; continue</text>;", "ui.tsx", d).count).toBe(0);
+});
+
+test("compressed dictionary projects real dynamic metadata without retaining unrelated translations", async () => {
+	const root = await mkdtemp(join(tmpdir(), "zh-dict-test-"));
+	try {
+		const generated = renderRuntimeDictionary([["Yolo", "全自动"], ["Dynamic label", "动态标签"], ["Risk", "风险"], ["Option", "选项"], ["Detail", "详情"], ["Unrelated", "无关"]]);
+		expect(generated.compressedBytes).toBeGreaterThan(0);
+		const file = join(root, "display.ts");
+		await writeFile(file, generated.source);
+		const { createZhDisplay } = await import(pathToFileURL(file).href);
+		const dynamic = "Dynamic" + " label";
+		const zh = createZhDisplay([{ ui: { label: dynamic, warning: "Risk", options: [{ label: "Option", description: "Detail", value: "Unrelated" }] } }, { ui: { label: "Yolo", options: "runtime" } }]);
+		expect(zh(dynamic)).toBe("动态标签");
+		expect(zh("Yolo")).toBe("全自动");
+		expect(zh("Risk")).toBe("风险");
+		expect(zh("Option")).toBe("选项");
+		expect(zh("Detail")).toBe("详情");
+		expect(zh("Unrelated")).toBe("Unrelated");
+		expect(zh("Missing")).toBe("Missing");
+		expect(createZhDisplay([])("Yolo")).toBe("Yolo");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("viewer rewrite preserves CRLF and accepts comments between checked anchors", () => {
+	const fixture = [
+		'import viewerAsset from "./viewer.generated.json" with { type: "json" };',
+		'let viewerScript: string; declare const viewer: string; declare const sourceCheckout: boolean;',
+		'if (sourceCheckout) {',
+		'  const escaped = viewer.replace(/x/g, "y");',
+		'  viewerScript = `<script>window.addEventListener("DOMContentLoaded",function(){${escaped}});</script>`;',
+		'} else {',
+		'  const viewerUrl = "https://build.stencil.so/web/omp/fixture";',
+		'  // retained layout comment',
+		'  viewerScript = `<script src="${viewerUrl}"></script>`;',
+		'}',
+	].join("\r\n");
+	const result = rewriteViewer(fixture, "fixture.ts");
+	expect(result).toContain("zhViewer.replace(");
+	expect(result).toContain("// retained layout comment");
+	expect(result).not.toContain("https://build.stencil.so/web/omp/");
+	expect(result.replaceAll("\r\n", "")).not.toContain("\n");
+	expect(() => rewriteViewer(fixture.replace("viewerUrl =", "unexpected ="), "fixture.ts")).toThrow();
 });

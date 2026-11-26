@@ -1,0 +1,77 @@
+name: Chinese overlay policy regression checks
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/zh-audit-checks.yml'
+      - '.github/zh-audit/**'
+      - 'localization/zh-CN/**'
+      - '.github/workflows/zh-release.yml'
+      - '.github/workflows/zh-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/zh-audit-checks.yml'
+      - '.github/zh-audit/**'
+      - 'localization/zh-CN/**'
+      - '.github/workflows/zh-release.yml'
+      - '.github/workflows/zh-build.yml'
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  policy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Test release planning and native provenance policy
+        run: |
+          set -euo pipefail
+          bash -n localization/zh-CN/resolve-upstream.sh
+          python3 localization/zh-CN/release-plan.py --test
+          python3 .github/zh-audit/test_verify_native.py
+
+  resolve-pr:
+    if: github.event_name == 'pull_request'
+    needs: policy
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.source.outputs.build }}
+      version: ${{ steps.source.outputs.version }}
+      sha: ${{ steps.source.outputs.sha }}
+      bun: ${{ steps.source.outputs.bun }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Determine whether release-affecting code changed
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          changed=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" --jq '.[].filename')
+          if ! grep -E '^localization/zh-CN/|^\.github/workflows/zh-(release|build)\.yml$' <<< "$changed" | grep -vE '^localization/zh-CN/(README\.md|translate\.test\.ts|LICENSE-dictionary)$' >/dev/null; then
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'build=true' >> "$GITHUB_OUTPUT"
+          tag=$(gh api repos/can1357/oh-my-pi/releases/latest --jq .tag_name)
+          bash localization/zh-CN/resolve-upstream.sh "$tag"
+  verify-overlay:
+    needs: resolve-pr
+    if: needs.resolve-pr.outputs.build == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/zh-build.yml
+    with:
+      version: ${{ needs.resolve-pr.outputs.version }}
+      sha: ${{ needs.resolve-pr.outputs.sha }}
+      bun: ${{ needs.resolve-pr.outputs.bun }}

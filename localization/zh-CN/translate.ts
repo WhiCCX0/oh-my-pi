@@ -1,6 +1,7 @@
 import { parse } from "@babel/parser";
 import { readFile, writeFile, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { gzipSync } from "node:zlib";
 
 type Node = { type: string; start: number; end: number; [key: string]: any };
 type Dictionary = Readonly<Record<string, string>>;
@@ -122,8 +123,13 @@ export function transform(source: string, file: string, dict: Dictionary) {
 		if (jsx && node.type === "JSXText") {
 			const original = source.slice(node.start, node.end);
 			const trimmed = original.trim();
-			const translated = lookup(dict, trimmed);
-			if (trimmed && translated !== trimmed) {
+			const decoded = String(node.value);
+			const display = decoded.trim();
+			// Babel decodes HTML entities. Keep raw surrounding whitespace, and
+			// skip ambiguous whitespace entities at the boundaries.
+			const edges = (value: string) => [value.slice(0, value.length - value.trimStart().length), value.slice(value.trimEnd().length)];
+			const translated = lookup(dict, display);
+			if (trimmed && display && translated !== display && JSON.stringify(edges(original)) === JSON.stringify(edges(decoded))) {
 				const start = node.start + original.indexOf(trimmed);
 				edits.push({ start, end: start + trimmed.length, text: "{" + JSON.stringify(translated) + "}" });
 			}
@@ -176,6 +182,35 @@ async function walk(root: string): Promise<string[]> {
 	}
 	return out;
 }
+// Do not evaluate native-dependent registry modules during cross compilation,
+// and do not guess dynamic setting strings. The compiled projection selects
+// only actual requested values from a compressed dictionary on cache misses.
+export function renderRuntimeDictionary(entries: readonly (readonly [string, string])[]): { source: string; compressedBytes: number } {
+	const compressed = gzipSync(Buffer.from(JSON.stringify(Object.fromEntries(entries))), { level: 9 });
+	const source = [
+		'// Generated at build time. No full dictionary is allocated on import.',
+		'import { gunzipSync } from "node:zlib";',
+		'const encoded = ' + JSON.stringify(compressed.toString("base64")) + ';',
+		'export type ZhDisplay = (value: string) => string;',
+		'type DisplayEntry = { ui?: { label?: string; description?: string; warning?: string; options?: readonly { label?: string; description?: string }[] | "runtime" } };',
+		'function translatorFor(selected: ReadonlyMap<string, string>): ZhDisplay { return value => selected.get(value) ?? value; }',
+		'export function createZhDisplay(entries: readonly DisplayEntry[]): ZhDisplay {',
+		'  const requested = new Set<string>();',
+		'  const add = (value: string | undefined) => { if (typeof value === "string") requested.add(value); };',
+		'  for (const { ui } of entries) {',
+		'    if (!ui) continue; add(ui.label); add(ui.description); add(ui.warning);',
+		'    if (Array.isArray(ui.options)) for (const option of ui.options) { add(option.label); add(option.description); }',
+		'  }',
+		'  if (requested.size === 0) return value => value;',
+		'  const dictionary = JSON.parse(gunzipSync(Buffer.from(encoded, "base64")).toString("utf8")) as Record<string, string>;',
+		'  const selected = new Map<string, string>();',
+		'  for (const value of requested) if (Object.hasOwn(dictionary, value)) selected.set(value, dictionary[value]);',
+		'  return translatorFor(selected);',
+		'}',
+		'',
+	].join("\n");
+	return { source, compressedBytes: compressed.length };
+}
 async function main() {
 	const root = process.cwd();
 	const dict: Dictionary = {
@@ -202,11 +237,17 @@ async function main() {
 	// Translate only the settings display projection, not persisted values.
 	const settings = join(root, "packages/coding-agent/src/config/settings-defs.ts");
 	let src = await readFile(settings, "utf8");
-	const entries = Object.entries(dict).filter(([k, v]) => k !== v && lookup(dict, k) === v);
-	await writeFile(join(root, "packages/coding-agent/src/config/zh-display.generated.ts"),
-		"// Generated at build time.\nconst entries = new Map<string, string>(" + JSON.stringify(entries) + ");\n" +
-		"export function zhDisplay(value: string): string { return entries.get(value) ?? value; }\n");
-	src = 'import { zhDisplay } from "./zh-display.generated";\n' + src;
+	const validEntries = Object.entries(dict).filter(([k, v]) => k !== v && lookup(dict, k) === v);
+	const generated = renderRuntimeDictionary(validEntries);
+	const proof = process.env.OMP_ZH_SMOKE_DICTIONARY_OUT;
+	if (proof) await writeFile(proof, JSON.stringify(Object.fromEntries(validEntries)));
+	console.log(JSON.stringify({ fullDictionaryEntries: validEntries.length, compressedDictionaryBytes: generated.compressedBytes, embeddedBase64Bytes: Math.ceil(generated.compressedBytes / 3) * 4, fullDictionaryBytes: Buffer.byteLength(JSON.stringify(Object.fromEntries(validEntries))) }));
+	await writeFile(join(root, "packages/coding-agent/src/config/zh-display.generated.ts"), generated.source);
+	src = 'import { createZhDisplay, type ZhDisplay } from "./zh-display.generated";\n' + src;
+	src = replaceExactly(src, 'function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {', 'function resolveOptions(ui: AnyUiMetadata, zhDisplay: ZhDisplay): OptionList | "runtime" | undefined {', settings);
+	src = replaceExactly(src, 'function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {', 'function entryToSettingDef(entry: SettingsDisplayEntry, zhDisplay: ZhDisplay): SettingDef | null {', settings);
+	src = replaceExactly(src, 'const options = resolveOptions(ui);', 'const options = resolveOptions(ui, zhDisplay);', settings);
+	src = replaceExactly(src, 'defs = [];\n\t\tfor (const entry of entries) {\n\t\t\tconst def = entryToSettingDef(entry);', 'defs = [];\n\t\tconst zhDisplay = createZhDisplay(entries);\n\t\tfor (const entry of entries) {\n\t\t\tconst def = entryToSettingDef(entry, zhDisplay);', settings);
 	for (const field of ["label", "description"]) src = replaceExactly(src, field + ": ui." + field + ",", field + ": zhDisplay(ui." + field + "),", settings);
 	src = replaceExactly(src, "warning: ui.warning,", "warning: ui.warning === undefined ? undefined : zhDisplay(ui.warning),", settings);
 	src = replaceExactly(src, "return ui.options;", "return ui.options.map(option => ({ ...option, label: zhDisplay(option.label), description: option.description === undefined ? undefined : zhDisplay(option.description) }));", settings);
@@ -237,6 +278,19 @@ async function main() {
 		'\tconst defs = getAllSettingDefs([{ path: "audit.setting", type: "enum", defaultValue: "yolo", enumValues: ["yolo"], ui: { tab: "interaction", label: "Yolo", description: "Yolo", options: [{ value: "yolo", label: "Yolo" }] } }]);',
 		'\tconst def = defs[0];',
 		'\tif (!def || def.path !== "audit.setting" || def.defaultValue !== "yolo" || def.label !== "Yolo（全自动）" || def.description !== "Yolo（全自动）" || def.type !== "submenu" || def.options[0]?.value !== "yolo" || def.options[0]?.label !== "Yolo（全自动）") throw new Error("Localized settings projection failed");',
+		'\tconst dictionaryPath = process.env.OMP_ZH_SMOKE_DICTIONARY;',
+		'\tif (dictionaryPath) {',
+		'\t\tconst full = await Bun.file(dictionaryPath).json();',
+		'\t\tconst { orderedSettings } = await import("./config/all-settings");',
+		'\t\tconst { createZhDisplay } = await import("./config/zh-display.generated");',
+		'\t\tconst registered = orderedSettings(); const zhDisplay = createZhDisplay(registered);',
+		'\t\tlet matched = 0; const missing = new Set<string>();',
+		'\t\tconst check = (value: unknown) => { if (typeof value !== "string") return; const expected = Object.hasOwn(full, value) ? full[value] : value; if (zhDisplay(value) !== expected) missing.add(value); if (expected !== value) matched++; };',
+		'\t\tfor (const { ui } of registered) { if (!ui) continue; check(ui.label); check(ui.description); check(ui.warning); if (Array.isArray(ui.options)) for (const option of ui.options) { check(option.label); check(option.description); } }',
+		'\t\tif (missing.size) throw new Error("Settings dictionary mismatches (" + missing.size + "): " + JSON.stringify([...missing].slice(0, 50)));',
+		'\t\tif (matched < 100) throw new Error("Insufficient runtime settings dictionary verification: " + matched);',
+		'\t\tprocess.stdout.write("settings-dictionary-smoke: " + matched + " matches\\n");',
+		'\t}',
 		'\tprocess.stdout.write("localization-smoke: ok\\n");',
 	].join("\n");
 	src = replaceExactly(src, smokeAnchor, smokeChecks + "\n" + smokeAnchor, cliSource);

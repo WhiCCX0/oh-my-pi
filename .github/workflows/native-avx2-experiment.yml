@@ -1,0 +1,20 @@
+name: Windows x64 native ISA experiment
+# The workflow must exist on the default branch for GitHub to register its
+# manual dispatch entry. Select experiment/native-avx2 to run its full version.
+on:
+  workflow_dispatch:
+    inputs:
+      trace:
+        description: Collect actual compiler subprocess evidence (fresh builds)
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  wrong-branch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 1
+    steps:
+      - run: |
+          echo "::error::Select branch experiment/native-avx2 in Run workflow; main is only the dispatch entry."
+          exit 1
