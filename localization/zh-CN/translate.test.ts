@@ -47,11 +47,16 @@ test("URL sentence punctuation and balanced delimiters are normalized", () => {
 	const source = "Open https://example.com/docs_(v1).";
 	const translated = "打开 https://example.com/docs_(v1)。";
 	expect(lookup({ [source]: translated }, source)).toBe(translated);
+	const fullwidth = "Read https://example.com/path";
+	expect(lookup({ [fullwidth]: "阅读 https://example.com/path）。" }, fullwidth)).toBe("阅读 https://example.com/path）。");
+	expect(lookup({ "[Must start with http:// or https://]": "[必须以 http:// 或 https:// 开头]" }, "[Must start with http:// or https://]")).toBe("[必须以 http:// 或 https:// 开头]");
 });
 
 test("printf directives, flags and named placeholders are protected", () => {
 	expect(lookup({ "Progress %s for {name}": "进度 %s：{name}" }, "Progress %s for {name}")).toBe("进度 %s：{name}");
 	expect(lookup({ "Progress %s": "进度 %d" }, "Progress %s")).toBe("Progress %s");
+	expect(lookup({ "100% used": "100% 已用" }, "100% used")).toBe("100% 已用");
+	expect(lookup({ "20% of quota": "配额的 20%" }, "20% of quota")).toBe("配额的 20%");
 	expect(lookup({ "Use --Model": "使用 --Model" }, "Use --Model")).toBe("使用 --Model");
 	expect(lookup({ "Use --Model": "使用 --model" }, "Use --Model")).toBe("Use --Model");
 	expect(lookup({ "Open {{path}}": "打开 {{file}}" }, "Open {{path}}")).toBe("Open {{path}}");
