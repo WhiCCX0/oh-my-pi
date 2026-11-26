@@ -1,4 +1,4 @@
-"""Extract only a verified upstream Windows native package; fail closed."""
+"""Verify the signed registry statement before extracting upstream Windows native files."""
 import base64
 import hashlib
 import json

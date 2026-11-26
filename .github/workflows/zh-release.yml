@@ -150,17 +150,17 @@ jobs:
             cd "$dir"
             # audit signatures loads the actual metadata tree, not only a lockfile.
             # Construct the one trusted dependency descriptor without unpacking any code.
-            node - "$VERSION" <<'NODE'
-            const fs = require("node:fs");
-            const name = "@oh-my-pi/pi-natives-win32-x64";
-            const version = process.argv[2];
-            if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Invalid native version");
-            fs.writeFileSync("package.json", JSON.stringify({
-              name: "native-verification", version: "1.0.0", private: true, dependencies: {[name]: version}
-            }));
-            fs.mkdirSync("node_modules/" + name, {recursive: true});
-            fs.writeFileSync("node_modules/" + name + "/package.json", JSON.stringify({name, version}));
-            NODE
+            node -e '
+              const fs = require("node:fs");
+              const name = "@oh-my-pi/pi-natives-win32-x64";
+              const version = process.argv[1];
+              if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Invalid native version");
+              fs.writeFileSync("package.json", JSON.stringify({
+                name: "native-verification", version: "1.0.0", private: true, dependencies: {[name]: version}
+              }));
+              fs.mkdirSync("node_modules/" + name, {recursive: true});
+              fs.writeFileSync("node_modules/" + name + "/package.json", JSON.stringify({name, version}));
+            ' "$VERSION"
             npm audit signatures --json --include-attestations > audit.json
             npm pack --ignore-scripts --json "$package" > pack.json
           )
