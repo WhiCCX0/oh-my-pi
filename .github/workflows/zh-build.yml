@@ -104,6 +104,7 @@ jobs:
           name: binary-win32-x64
           path: source/packages/coding-agent/binaries/omp-windows-x64.exe
           if-no-files-found: error
+          retention-days: 7
       - name: Upload full dictionary for independent Windows coverage check
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -117,6 +118,7 @@ jobs:
           name: native-notices-win32-x64
           path: source/packages/natives/native/THIRD-PARTY-NOTICES.txt
           if-no-files-found: error
+          retention-days: 7
   smoke:
     needs: build
     runs-on: windows-2025

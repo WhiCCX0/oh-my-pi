@@ -19,6 +19,7 @@ NAME = "@oh-my-pi/pi-natives-win32-x64"
 VERSION = "19.2.1"
 COMMIT = "a" * 40
 SAN = "URI:https://github.com/can1357/oh-my-pi/.github/workflows/ci.yml@refs/heads/main"
+ISSUER = "\n            1.3.6.1.4.1.57264.1.8: \n                ..https://token.actions.githubusercontent.com\n"
 ADDON = "package/pi_natives.win32-x64-baseline.node"
 
 class NativePolicyTests(unittest.TestCase):
@@ -61,18 +62,18 @@ class NativePolicyTests(unittest.TestCase):
     def refresh_digest(self):
         self.statement["subject"][0]["digest"]["sha512"] = hashlib.sha512(self.archive.read_bytes()).hexdigest()
 
-    def verify(self, san=SAN):
+    def verify(self, san=SAN, issuer=ISSUER):
         self.verified["attestationBundles"][0]["bundle"]["dsseEnvelope"]["payload"] = (
             base64.b64encode(json.dumps(self.statement).encode()).decode()
         )
         self.audit.write_text(json.dumps(self.report))
         # Only certificate rendering is stubbed; this tests policy, not cryptographic signature validation.
-        with patch.object(native.subprocess, "check_output", return_value=san):
+        with patch.object(native.subprocess, "check_output", return_value="X509v3 Subject Alternative Name: \n    " + san + issuer):
             native.verify_and_extract(self.archive, self.audit, VERSION, COMMIT, self.target)
 
-    def reject(self, message, san=SAN):
+    def reject(self, message, san=SAN, issuer=ISSUER):
         with self.assertRaisesRegex(ValueError, message):
-            self.verify(san)
+            self.verify(san, issuer)
 
     def test_valid_extracts_only_required_files(self):
         self.verify()
@@ -149,6 +150,40 @@ class NativePolicyTests(unittest.TestCase):
         self.write_archive()
         self.refresh_digest()
         self.reject("Missing Windows addon")
+
+    def test_wrong_issuer(self):
+        self.reject("No verified provenance", issuer=ISSUER.replace("token.actions.githubusercontent.com", "example.invalid"))
+        self.reject("No verified provenance", issuer="")
+
+    def test_san_prefix_and_exact_tag(self):
+        self.reject("No verified provenance", "X" + SAN)
+        self.reject("No verified provenance", SAN.replace("heads/main", "tags/v0.0.0"))
+
+    def test_empty_cert_chain(self):
+        self.verified["attestationBundles"][0]["bundle"]["verificationMaterial"] = {"x509CertificateChain": {"certificates": []}}
+        self.reject("No verified provenance")
+
+    def test_normalized_duplicate(self):
+        self.files.append(("package/./" + pathlib.PurePosixPath(ADDON).name, b"duplicate"))
+        self.write_archive()
+        self.refresh_digest()
+        self.reject("Unsafe or duplicate tar member")
+
+    def test_missing_notices(self):
+        self.files = [item for item in self.files if not item[0].endswith("NOTICES.txt")]
+        self.write_archive()
+        self.refresh_digest()
+        self.reject("Missing required file")
+
+    def test_special_tar_members(self):
+        for kind in (tarfile.LNKTYPE, tarfile.FIFOTYPE):
+            with self.subTest(kind=kind):
+                member = tarfile.TarInfo("package/special")
+                member.type = kind
+                member.linkname = ADDON
+                self.write_archive([member])
+                self.refresh_digest()
+                self.reject("Unsafe or duplicate tar member")
 
     def test_empty_addon(self):
         self.files[1] = (ADDON, b"")
