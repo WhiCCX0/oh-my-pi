@@ -18,6 +18,10 @@ CHILD = re.compile(r'^(?:clone3?|fork|vfork)\(|^<\.\.\. (?:clone3?|fork|vfork) r
 RESULT = re.compile(r'\)\s+=\s+(\d+)\s*$')
 CARGO = re.compile(r'(?:cargo[_-]build[_-]script|build[_-]script[_-](?:runner|build)|[/\\]_bs(?:[/\\]|$))', re.I)
 COMPILER = re.compile(r'clang(?:-cl|\+\+|-\d+)?(?:\.exe)?$', re.I)
+# Only the known Bazel-generated wrapper may defer the ISA check. Its next
+# successful exec in the same PID must be the pinned LLVM repository driver.
+WRAPPER = re.compile(r'(?:^|/)external/(?:[^/]*\+)?msvc_cc/bin/clang-cl$')
+LLVM_DRIVER = re.compile(r'(?:^|/)external/(?:[^/]*\+)?llvm_msvc_tools/bin/clang-cl$')
 ARCH = re.compile(r'^(?:/clang:)?(?:-march=|-mcpu=|/arch:)', re.I)
 SPECIAL = re.compile(r'^(?:/clang:)?-m(?:no-)?(?:avx|bmi|fma|f16c|lzcnt|movbe|sse)', re.I)
 
@@ -43,10 +47,13 @@ def windows_target(args):
 def inspect(directory, variant):
     parents, executables, compilers = {}, {}, []
     errors = []
+    wrapper_invocations = 0
+    wrapper_handoffs = 0
     for file in sorted(directory.glob("exec.*")):
         if not file.name.rsplit(".", 1)[-1].isdigit():
             continue
         pid = int(file.name.rsplit(".", 1)[-1])
+        pending_wrapper = None
         with file.open(encoding="utf-8", errors="replace") as stream:
             for line in stream:
                 if CHILD.match(line) and (child := RESULT.search(line)):
@@ -56,6 +63,20 @@ def inspect(directory, variant):
                     continue
                 path, argv = result
                 executables.setdefault(pid, []).append(path)
+                wrapper = None
+                if pending_wrapper is not None:
+                    if LLVM_DRIVER.search(path) and argv is not None and windows_target(argv) and "-cc1" not in argv and "-cc1as" not in argv:
+                        wrapper = pending_wrapper
+                        wrapper_handoffs += 1
+                    else:
+                        errors.append(f"Wrapper did not exec the expected Windows LLVM driver in PID {pid}: {pending_wrapper} -> {path}")
+                    pending_wrapper = None
+                if WRAPPER.search(path):
+                    wrapper_invocations += 1
+                    if argv is None:
+                        errors.append("Truncated wrapper argument vector: " + path)
+                    pending_wrapper = path
+                    continue
                 if not COMPILER.search(path.rsplit("/", 1)[-1]):
                     continue
                 if argv is None:
@@ -63,7 +84,9 @@ def inspect(directory, variant):
                     continue
                 if not windows_target(argv) or "-cc1" in argv or "-cc1as" in argv:
                     continue
-                compilers.append((pid, path, argv))
+                compilers.append((pid, path, argv, wrapper))
+        if pending_wrapper is not None:
+            errors.append(f"Wrapper has no observed LLVM driver handoff in PID {pid}: {pending_wrapper}")
 
     def cargo_ancestor(pid):
         seen = set()
@@ -78,7 +101,7 @@ def inspect(directory, variant):
         return None
 
     records = []
-    for pid, path, args in compilers:
+    for pid, path, args, wrapper in compilers:
         flags = [arg for arg in args if ARCH.match(arg)]
         special = [arg for arg in args if SPECIAL.match(arg) and arg not in ("-msse4.1", "-msse4.2")]
         response = [arg for arg in args if arg.startswith("@")]
@@ -97,7 +120,7 @@ def inspect(directory, variant):
                 special.extend(flags)
         if response:
             errors.append("Unexpanded Windows compiler response file: " + repr(response))
-        records.append({"pid": pid, "compiler": path, "argv": args, "cargo_ancestor": ancestry,
+        records.append({"pid": pid, "compiler": path, "wrapper": wrapper, "argv": args, "cargo_ancestor": ancestry,
                         "specialized_isa_flags": sorted(set(special)), "response_files": response})
     cargo_count = sum(bool(record["cargo_ancestor"]) for record in records)
     if not records:
@@ -105,6 +128,7 @@ def inspect(directory, variant):
     if not cargo_count:
         errors.append("No actual Windows compiler invocation descended from an identified Cargo build script")
     return {"variant": variant, "compiler_invocations": len(records), "cargo_descendants": cargo_count,
+            "wrapper_invocations": wrapper_invocations, "wrapper_handoffs": wrapper_handoffs,
             "specialized_invocations": sum(bool(record["specialized_isa_flags"]) for record in records),
             "records": records, "errors": list(dict.fromkeys(errors))}
 

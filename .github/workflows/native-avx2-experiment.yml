@@ -50,7 +50,7 @@ jobs:
       - name: Check out independently verified A0 policy
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 11eb41e7386df2a07e6924c37b2730e816fea565
+          ref: ac1616560eb7d04d2a58afe97dcec88f310a1ad8
           path: verification-overlay
           sparse-checkout: localization/zh-CN
           persist-credentials: false

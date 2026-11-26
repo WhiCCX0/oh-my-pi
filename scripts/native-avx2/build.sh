@@ -257,7 +257,7 @@ result = {
         "target": "win32-x64",
         "bun": command_version(["bun", "--version"]),
         "bazelisk": command_version(["bazelisk", "--version"]),
-        "localization_commit": "4960979f9f70fc00e673b648d8d70fda23973fc5",
+        "localization_commit": "ac1616560eb7d04d2a58afe97dcec88f310a1ad8",
         "a0_verified_sha256": os.environ["A0_VERIFIED_SHA256"],
         "trace_enabled": os.environ["OMP_NATIVE_TRACE"] == "true",
         "trace_reports": {p.name: sha256(p) for p in sorted(artifacts.glob("compiler-trace-*.json"))},

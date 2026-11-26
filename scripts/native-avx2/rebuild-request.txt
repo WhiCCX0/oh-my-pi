@@ -1,1 +1,1 @@
-2026-11-26: second-review smoke-receipt-bound signed four-group EXEs with independent A0 verification, r6 overlay and traced compiler evidence
+2026-11-26: third-review trace wrapper handoff fix, unified ac1616560e provenance/overlay pin, full traced build and smoke-receipt-bound attestation

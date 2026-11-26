@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 4960979f9f70fc00e673b648d8d70fda23973fc5
+          ref: ac1616560eb7d04d2a58afe97dcec88f310a1ad8
           path: overlay
           persist-credentials: false
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C source rev-parse HEAD)" = b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
-          test "$(git -C overlay rev-parse HEAD)" = 4960979f9f70fc00e673b648d8d70fda23973fc5
+          test "$(git -C overlay rev-parse HEAD)" = ac1616560eb7d04d2a58afe97dcec88f310a1ad8
           (
             cd native-artifacts
             sha256sum --check SHA256SUMS.txt
@@ -168,7 +168,7 @@ jobs:
           bun run ci:release:build-binaries
           mkdir -p ../dist
           cp packages/coding-agent/binaries/omp-windows-x64.exe "../dist/$GROUP.exe"
-          jq -e '.experiment.localization_commit == "4960979f9f70fc00e673b648d8d70fda23973fc5"' ../native-artifacts/manifest.json >/dev/null
+          jq -e '.experiment.localization_commit == "ac1616560eb7d04d2a58afe97dcec88f310a1ad8"' ../native-artifacts/manifest.json >/dev/null
           cp ../native-artifacts/manifest.json "../dist/$GROUP-native-manifest.json"
           cp LICENSE "../dist/$GROUP-LICENSE"
           cp .zh-build/LICENSE-dictionary "../dist/$GROUP-LICENSE-dictionary"
