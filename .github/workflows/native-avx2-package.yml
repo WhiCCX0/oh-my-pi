@@ -1,10 +1,13 @@
 name: Package Windows x64 ISA experiment EXEs
 on:
-  push:
-    branches: [experiment/native-avx2]
-    paths:
-      - '.github/workflows/native-avx2-package.yml'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      artifact_id:
+        required: true
+        type: string
+      artifact_digest:
+        required: true
+        type: string
 permissions:
   contents: read
   actions: read
@@ -44,23 +47,26 @@ jobs:
           ref: b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
           path: source
           persist-credentials: false
-      - name: Download exact independently pinned historical archive
+      - name: Download and verify exact same-run native archive
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
         shell: bash
         run: |
           set -euo pipefail
-          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/45804292772")
-          jq -e '.conclusion == "success" and .head_repository.full_name == "WhiCCX0/oh-my-pi" and .head_branch == "experiment/native-avx2" and .head_sha == "546b5b8987ef780af269d7786802bafae601f655" and .path == ".github/workflows/native-avx2-experiment.yml"' <<< "$run"
-          artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/15115038679")
-          jq -e '.expired == false and .name == "native-avx2-v19.2.1-45804292772" and .workflow_run.id == 45804292772 and .digest == "sha256:3c402b79f80c6e584de15f15e45e218d77d5da0bea8245f52300471eb72fd752"' <<< "$artifact"
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          digest="${ARTIFACT_DIGEST#sha256:}"
+          [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+          artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
+          jq -e --arg name "native-avx2-v19.2.1-$GITHUB_RUN_ID" --arg id "$GITHUB_RUN_ID" --arg digest "sha256:$digest" '.expired == false and .name == $name and (.workflow_run.id|tostring) == $id and .digest == $digest' <<< "$artifact"
           archive="$RUNNER_TEMP/native-input.zip"
           curl --fail --silent --show-error --location --retry 3 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/15115038679/zip" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
             -o "$archive"
-          echo "3c402b79f80c6e584de15f15e45e218d77d5da0bea8245f52300471eb72fd752  $archive" | sha256sum -c -
+          echo "$digest  $archive" | sha256sum -c -
           mkdir native-artifacts
           unzip -q "$archive" -d native-artifacts
           rm -f "$archive"
@@ -76,13 +82,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/45804292772" --jq .conclusion)" = success
           test "$(git -C source rev-parse HEAD)" = b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
           test "$(git -C overlay rev-parse HEAD)" = 165b611c31fa04c8899767774e46cae232ba0c03
           (
             cd native-artifacts
             sha256sum --check SHA256SUMS.txt
-            jq -e '.source.commit == "b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac" and .experiment.workflow_commit == "546b5b8987ef780af269d7786802bafae601f655"' manifest.json
+            jq -e --arg sha "$GITHUB_SHA" '.source.commit == "b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac" and .experiment.workflow_commit == $sha' manifest.json
             file="$FOLDER/pi_natives.win32-x64-$VARIANT.node"
             test "$(jq -r --arg g "$GROUP" '.experiment.groups[$g].file' manifest.json)" = "$file"
             test "$(sha256sum "$file" | cut -d' ' -f1)" = "$(jq -r --arg g "$GROUP" '.experiment.groups[$g].sha256' manifest.json)"
@@ -199,6 +204,10 @@ jobs:
     needs: [package, smoke]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -215,6 +224,13 @@ jobs:
             sha256sum -c "$group.sha256"
           done
           sha256sum A0.exe A1.exe B.exe C.exe > SHA256SUMS.txt
+      - name: Attest verified EXE checksums and native manifests
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*-native-manifest.json
+            dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: OMP-AVX2-four-verified-EXEs

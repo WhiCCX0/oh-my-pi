@@ -1,0 +1,1 @@
+2026-11-26: full audited rebuild with pinned npm provenance, same-run packaging and EXE attestations

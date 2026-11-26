@@ -37,42 +37,35 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "=== A0: official npm baseline ==="
 mkdir -p "$ARTIFACTS/A0-official-baseline"
-npm pack --registry=https://registry.npmjs.org --ignore-scripts --json --pack-destination "$TMP" "@oh-my-pi/pi-natives-win32-x64@$VERSION" > "$TMP/npm-pack.json"
+VERIFY_SCRIPT="${OMP_NATIVE_VERIFY_SCRIPT:?Set OMP_NATIVE_VERIFY_SCRIPT to the pinned formal release verifier}"
+test -f "$VERIFY_SCRIPT" || fail "Pinned native provenance verifier not found"
+(
+  cd "$TMP"
+  export npm_config_registry=https://registry.npmjs.org
+  export npm_config_userconfig="$TMP/.npmrc"
+  export npm_config_globalconfig="$TMP/global.npmrc"
+  node -e '
+    const fs = require("node:fs");
+    const name = "@oh-my-pi/pi-natives-win32-x64";
+    const version = process.argv[1];
+    if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Invalid native version");
+    fs.writeFileSync("package.json", JSON.stringify({
+      name: "native-verification", version: "1.0.0", private: true, dependencies: {[name]: version}
+    }));
+    fs.mkdirSync("node_modules/" + name, {recursive: true});
+    fs.writeFileSync("node_modules/" + name + "/package.json", JSON.stringify({name, version}));
+  ' "$VERSION"
+  npm audit signatures --json --include-attestations > audit.json
+  npm pack --ignore-scripts --json "@oh-my-pi/pi-natives-win32-x64@$VERSION" > npm-pack.json
+)
 TARBALL="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(p[0].filename)' "$TMP/npm-pack.json")"
 [[ "$TARBALL" =~ ^[A-Za-z0-9._-]+\.tgz$ ]] || fail "npm pack returned an unsafe tarball name"
-INTEGRITY="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))[0].integrity' "$TMP/npm-pack.json")"
-[[ "$INTEGRITY" == "sha512-$(openssl dgst -sha512 -binary "$TMP/$TARBALL" | openssl base64 -A)" ]] || fail "A0 npm tarball integrity mismatch"
-python3 - "$TMP/$TARBALL" "$TMP" <<'PY'
-import pathlib, shutil, sys, tarfile
-root = pathlib.Path(sys.argv[2]) / "package"
-root.mkdir()
-with tarfile.open(sys.argv[1], "r:gz") as tar:
-    seen = set()
-    for item in tar.getmembers():
-        path = pathlib.PurePosixPath(item.name)
-        if path.is_absolute() or "\\" in item.name or ".." in path.parts or not path.parts or path.parts[0] != "package":
-            raise ValueError("Unsafe native archive path: " + item.name)
-        if not (item.isfile() or item.isdir()) or item.name in seen:
-            raise ValueError("Unsafe or duplicate member: " + item.name)
-        seen.add(item.name)
-        if item.name in ("package/package.json", "package/pi_natives.win32-x64-baseline.node", "package/THIRD-PARTY-NOTICES.txt"):
-            if not item.isfile() or item.size <= 0:
-                raise ValueError("Expected regular nonempty file: " + item.name)
-            with tar.extractfile(item) as source, (root / path.name).open("wb") as target:
-                shutil.copyfileobj(source, target)
-PY
-node - "$TMP/package/package.json" <<'NODE'
-const p = require(process.argv[2]);
-if (p.name !== "@oh-my-pi/pi-natives-win32-x64" || p.version !== "19.2.1") {
-  throw new Error("Unexpected npm package identity: " + p.name + "@" + p.version);
-}
-NODE
-A0_FILE="$TMP/package/pi_natives.win32-x64-baseline.node"
+python3 "$VERIFY_SCRIPT" "$TMP/$TARBALL" "$TMP/audit.json" "$VERSION" "$SOURCE_SHA" "$TMP/verified"
+cp "$TMP/audit.json" "$ARTIFACTS/A0-npm-provenance.json"
+A0_FILE="$TMP/verified/pi_natives.win32-x64-baseline.node"
 test -s "$A0_FILE" || fail "official npm package did not contain the expected baseline addon"
 cp "$A0_FILE" "$ARTIFACTS/A0-official-baseline/"
-if [[ -f "$TMP/package/THIRD-PARTY-NOTICES.txt" ]]; then
-  cp "$TMP/package/THIRD-PARTY-NOTICES.txt" "$ARTIFACTS/A0-official-baseline/"
-fi
+cp "$TMP/verified/THIRD-PARTY-NOTICES.txt" "$ARTIFACTS/A0-official-baseline/"
 if ! grep -aFq "PI_NATIVES_VERSION_STAMP:$VERSION" "$A0_FILE" && ! grep -aFq "__piNativesV19_2_1" "$A0_FILE"; then
   fail "official A0 addon has neither the v19.2.1 stamp nor the legacy release sentinel"
 fi
