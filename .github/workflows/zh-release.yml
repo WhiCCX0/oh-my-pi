@@ -41,16 +41,48 @@ jobs:
           sha=$(printf '%s\n' "$refs" | awk '/\^\{\}$/ { print $1; found=1 } END { if (!found) exit 1 }' || true)
           if [[ -z "$sha" ]]; then sha=$(printf '%s\n' "$refs" | awk 'NR == 1 { print $1 }'); fi
           [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
-          bun=$(gh api "repos/$upstream/contents/.github/workflows/ci.yml?ref=$sha" --jq .content | base64 -d | sed -nE 's/^[[:space:]]*bun-version: ([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p' | sort -u)
-          [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          local_tag="zh-$tag-r$ZH_REVISION"
-          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
-            # GitHub's native non-force fork synchronization API.
-            gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main
+          if [[ "$GITHUB_REF" != refs/heads/main && "$GITHUB_REF" != refs/heads/zh-localization ]]; then
+            echo "::error::Run this workflow from main (or zh-localization for validation only)."
+            exit 1
           fi
+          ci_content=$(gh api "repos/$upstream/contents/.github/workflows/ci.yml?ref=$sha" --jq .content | base64 -d)
+          bun=$(printf '%s\n' "$ci_content" | sed -nE "s/^[[:space:]]*bun-version:[[:space:]]*['\"]?([0-9]+\.[0-9]+\.[0-9]+)['\"]?[[:space:]]*(#.*)?$/\1/p" | sort -u)
+          bun_count=$(printf '%s\n' "$bun" | sed '/^$/d' | wc -l)
+          if [[ "$bun_count" -ne 1 ]]; then
+            package_json=$(gh api "repos/$upstream/contents/package.json?ref=$sha" --jq .content | base64 -d)
+            bun=$(printf '%s' "$package_json" | jq -r '.packageManager // empty' | sed -nE 's/^bun@[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p')
+          fi
+          [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Could not resolve one supported Bun version from upstream CI or packageManager."
+            exit 1
+          }
+
+          local_tag="zh-$tag-r$ZH_REVISION"
           build=true
-          if [[ "$GITHUB_REF" == refs/heads/main ]] && [[ $(gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true) == false ]]; then
-            build=false
+          state=$(gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish 2>/dev/null || true)
+          if [[ -n "$state" ]]; then
+            is_draft=$(jq -r .isDraft <<< "$state")
+            draft_target=$(jq -r .targetCommitish <<< "$state")
+            if [[ "$is_draft" == "false" && "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+              build=false
+            elif [[ "$is_draft" == "false" || "$draft_target" != "$GITHUB_SHA" ]]; then
+              revision=$((ZH_REVISION + 1))
+              while true; do
+                candidate="zh-$tag-r$revision"
+                candidate_state=$(gh release view "$candidate" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish 2>/dev/null || true)
+                if [[ -z "$candidate_state" ]]; then
+                  local_tag="$candidate"
+                  break
+                fi
+                candidate_draft=$(jq -r .isDraft <<< "$candidate_state")
+                candidate_target=$(jq -r .targetCommitish <<< "$candidate_state")
+                if [[ "$candidate_draft" == "true" && "$candidate_target" == "$GITHUB_SHA" ]]; then
+                  local_tag="$candidate"
+                  break
+                fi
+                revision=$((revision + 1))
+              done
+            fi
           fi
           printf 'version=%s\nsha=%s\ntag=%s\nbuild=%s\nbun=%s\n' "${tag#v}" "$sha" "$local_tag" "$build" "$bun" >> "$GITHUB_OUTPUT"
   build:
@@ -102,9 +134,36 @@ jobs:
         run: |
           set -euo pipefail
           dir=$(mktemp -d)
-          npm pack --ignore-scripts --pack-destination "$dir" "@oh-my-pi/pi-natives-$NATIVE@$VERSION"
-          tar -xzf "$dir"/*.tgz -C "$dir"
-          cp "$dir"/package/*.node packages/natives/native/
+          package="@oh-my-pi/pi-natives-$NATIVE@$VERSION"
+          for attempt in 1 2 3; do
+            if npm pack --ignore-scripts --json --pack-destination "$dir" "$package" > "$dir/pack.json"; then
+              break
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "::error::Failed to download $package after three attempts."
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+          tarball=$(jq -r '.[0].filename // empty' "$dir/pack.json")
+          integrity=$(jq -r '.[0].integrity // empty' "$dir/pack.json")
+          [[ -n "$tarball" && -f "$dir/$tarball" && -n "$integrity" ]]
+          actual_integrity="sha512-$(openssl dgst -sha512 -binary "$dir/$tarball" | openssl base64 -A)"
+          [[ "$actual_integrity" == "$integrity" ]]
+          tar -xzf "$dir/$tarball" -C "$dir"
+          node - "$dir/package/package.json" "$VERSION" "$NATIVE" <<'NODE'
+          const fs = require("node:fs");
+          const [file, version, native] = process.argv.slice(2);
+          const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+          if (pkg.name !== "@oh-my-pi/pi-natives-" + native || pkg.version !== version) {
+            throw new Error("Native package identity/version mismatch");
+          }
+          NODE
+          shopt -s nullglob
+          addons=("$dir"/package/*.node)
+          [[ "${#addons[@]}" -gt 0 ]]
+          test -s "$dir/package/THIRD-PARTY-NOTICES.txt"
+          cp "${addons[@]}" packages/natives/native/
           cp "$dir"/package/THIRD-PARTY-NOTICES.txt packages/natives/native/THIRD-PARTY-NOTICES.txt
       - name: Regenerate localized export viewer manifest
         working-directory: source
@@ -126,11 +185,10 @@ jobs:
           name: binary-${{ matrix.target }}
           path: source/packages/coding-agent/binaries/${{ matrix.asset }}
           if-no-files-found: error
-      - name: Upload native license notices
-        if: matrix.target == 'linux-x64'
+      - name: Upload native license notices for this target
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: binary-legal
+          name: native-notices-${{ matrix.target }}
           path: source/packages/natives/native/THIRD-PARTY-NOTICES.txt
           if-no-files-found: error
   smoke:
@@ -187,6 +245,10 @@ jobs:
           pattern: binary-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: native-notices-*
+          path: legal
       - name: Publish immutable Chinese release
         shell: bash
         env:
@@ -204,6 +266,15 @@ jobs:
           fi
           cp LICENSE dist/LICENSE
           cp localization/zh-CN/LICENSE-dictionary dist/LICENSE-dictionary
+          {
+            echo "Third-party notices for the native addon packages used by this release."
+            for target in win32-x64 win32-arm64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+              notice="legal/native-notices-$target/THIRD-PARTY-NOTICES.txt"
+              test -s "$notice"
+              printf '\n===== %s =====\n' "$target"
+              cat "$notice"
+            done
+          } > dist/THIRD-PARTY-NOTICES.txt
           (cd dist && sha256sum omp-* > SHA256SUMS.txt)
           printf '上游版本：v%s\n上游提交：%s\n汉化覆盖层提交：%s\n\n界面与帮助汉化，未覆盖的文字保留英文。Windows、Linux glibc、macOS 的 x64 与 arm64 均通过基础烟测。macOS 为 ad-hoc 签名。请从本仓库下载更新。\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_SHA" > notes.md
           if [[ -z "$state" ]]; then

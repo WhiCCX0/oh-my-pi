@@ -18,3 +18,12 @@
 发布时附带原生模块第三方版权声明。发布过程先建草稿、上传全部资产，再公开；同一提交可重试草稿，已公开版本不覆盖。
 
 导出 HTML 的 viewer 内容哈希因构建期转换而变化，因此将校验过的 viewer 内联到汉化二进制生成的 HTML 中，避免指向不存在的官方 CDN 文件；官方共享 Markdown/高亮依赖保持不变。
+
+## 审计加固记录
+
+- URL 指纹忽略句末标点，同时校验 CLI flags、printf 格式符及命名占位符；AST 解析错误附带源文件路径，编辑器会去重完全相同的范围并拒绝冲突范围。
+- JSX 显示属性使用 JavaScript 字符串表达式，双引号、反斜杠、换行及标记字符均由 JSON 编码保护。
+- Release 修订号在显式 push/dispatch 时自动寻找可用版本；定时任务遇到已发布版本则跳过。Bun 版本解析优先读取上游 CI，必要时回退 packageManager；原生包下载带重试和 SRI 校验。
+- 六个平台分别上传原生模块第三方声明，并合并到 Release 资产。
+- 上游继承的 CI 在 push main 时请求上游专用自托管 Runner，Fork 中可能长期排队；PR 路径仍使用 GitHub 托管 Runner。Stale 工作流则使用 GitHub 托管 Runner 且已成功执行，不应与 CI 队列问题混为一谈。为保持上游文件零修改，本覆盖层不改写这两个工作流。
+- embed-viewer.ts 只修改构建临时目录中的 HTML index 并生成内嵌 viewer 文本，不覆盖上游 viewer-html.ts。编译器将 process.env.PI_COMPILED 定义为 true，汉化二进制的官方自更新保护已生效。
