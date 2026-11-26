@@ -9,7 +9,7 @@ const attributes = new Set(["label", "title", "description", "placeholder", "tex
 const headings: Dictionary = { USAGE: "用法", COMMANDS: "命令", ARGUMENTS: "参数", FLAGS: "选项", EXAMPLES: "示例" };
 
 // Unknown text or changed technical tokens fall back to English.
-const URL_PATTERN = /https?:\/\/[^\s\"'<>]*/giu;
+const URL_PATTERN = /https?:\/\/[^\s\"'<>。，；：！？、）】》」』]*/giu;
 const URL_TRAILING_PUNCTUATION = /[.,;:!?。，；：！？、）】》」』]+$/u;
 const TOKEN_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
 	["flag", /--[A-Za-z][A-Za-z0-9-]*/g],

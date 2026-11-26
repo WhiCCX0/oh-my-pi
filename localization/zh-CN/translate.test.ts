@@ -50,6 +50,9 @@ test("URL sentence punctuation and balanced delimiters are normalized", () => {
 	const fullwidth = "Read https://example.com/path";
 	expect(lookup({ [fullwidth]: "阅读 https://example.com/path）。" }, fullwidth)).toBe("阅读 https://example.com/path）。");
 	expect(lookup({ "[Must start with http:// or https://]": "[必须以 http:// 或 https:// 开头]" }, "[Must start with http:// or https://]")).toBe("[必须以 http:// 或 https:// 开头]");
+	const cdp = "Default HTTP CDP discovery endpoint (for example http://127.0.0.1:9222) to attach to instead of launching a browser.";
+	const cdpZh = "默认 HTTP CDP 发现端点（例如 http://127.0.0.1:9222），用于连接现有浏览器而不是启动新浏览器。";
+	expect(lookup({ [cdp]: cdpZh }, cdp)).toBe(cdpZh);
 });
 
 test("printf directives, flags and named placeholders are protected", () => {
