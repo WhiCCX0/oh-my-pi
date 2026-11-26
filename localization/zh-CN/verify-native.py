@@ -40,16 +40,22 @@ def verify_and_extract(archive, audit, version, commit, target):
                         and (dep.get("digest", {}).get("gitCommit") == commit or dep.get("digest", {}).get("sha1") == commit)
                         for dep in dependencies)
         material = bundle["verificationMaterial"]
-        cert = material.get("certificate") or material.get("x509CertificateChain", {}).get("certificates", [{}])[0]
+        chain = material.get("x509CertificateChain", {}).get("certificates") or []
+        cert = material.get("certificate") or (chain[0] if chain else {})
         if not cert.get("rawBytes"):
             continue
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "cert.der"
             path.write_bytes(base64.b64decode(cert["rawBytes"], validate=True))
             san = subprocess.check_output(["openssl", "x509", "-inform", "DER", "-in", str(path),
-                                           "-noout", "-ext", "subjectAltName"], text=True)
-        identity_ok = bool(re.search(r"URI:https://github\.com/can1357/oh-my-pi/\.github/workflows/ci\.yml@refs/(?:heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)(?=\s|,|$)", san))
-        if source_ok and identity_ok:
+                                           "-noout", "-text"], text=True)
+        # Restrict SAN matching to the subjectAltName extension, not arbitrary
+        # certificate fields; match the exact version if a tag is used.
+        san_ext = re.search(r"(?m)^[ \t]*X509v3 Subject Alternative Name:[^\r\n]*\r?\n([ \t]+[^\r\n]+)", san)
+        identity = r"(?:^|[\s,])URI:https://github\.com/can1357/oh-my-pi/\.github/workflows/ci\.yml@refs/(?:heads/main|tags/v" + re.escape(version) + r")(?=\s|,|$)"
+        identity_ok = bool(san_ext and re.search(identity, san_ext.group(1)))
+        issuer_ok = bool(re.search(r"(?m)^[ \t]*1\.3\.6\.1\.4\.1\.57264\.1\.(?:1|8):[ \t]*(?:critical)?[ \t]*\r?\n[ \t]*(?:\.\.)?https://token\.actions\.githubusercontent\.com[ \t]*\r?$", san))
+        if source_ok and identity_ok and issuer_ok:
             trusted = True
             break
     if not trusted:
@@ -61,11 +67,14 @@ def verify_and_extract(archive, audit, version, commit, target):
             p = pathlib.PurePosixPath(member.name)
             if p.is_absolute() or "\\" in member.name or ".." in p.parts or not p.parts or p.parts[0] != "package":
                 raise ValueError("Unsafe tar path: " + member.name)
-            if not (member.isfile() or member.isdir()) or member.name in members:
+            canonical = p.as_posix()
+            if not (member.isfile() or member.isdir()) or canonical in members:
                 raise ValueError("Unsafe or duplicate tar member: " + member.name)
-            members[member.name] = member
+            members[canonical] = member
         def read(path):
-            member = members[path]
+            member = members.get(path)
+            if member is None:
+                raise ValueError("Missing required file: " + path)
             if not member.isfile():
                 raise ValueError("Expected regular file: " + path)
             return tar.extractfile(member)
@@ -78,9 +87,11 @@ def verify_and_extract(archive, audit, version, commit, target):
             raise ValueError("Missing Windows addon")
         files.append("package/THIRD-PARTY-NOTICES.txt")
         for path in files:
+            if path not in members:
+                raise ValueError("Missing required file: " + path)
             if members[path].size <= 0:
                 raise ValueError("Empty required file: " + path)
-            with read(path) as source, (target / pathlib.PurePosixPath(path).name).open("wb") as dest:
+            with read(path) as source, (target / pathlib.PurePosixPath(path).name).open("xb") as dest:
                 shutil.copyfileobj(source, dest)
     print("Verified upstream npm signature, provenance, archive and selected native files.")
 

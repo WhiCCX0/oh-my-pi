@@ -6,11 +6,18 @@ import unittest
 
 
 def plan(pages, version, minimum, sha, scheduled):
+    if type(minimum) is not int or minimum < 1:
+        raise ValueError("minimum revision must be a positive integer")
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise ValueError("Expected stable upstream version")
     prefix = "zh-" + version + "-r"
     revisions = {}
     for page in pages:
         for release in page:
-            match = re.fullmatch(re.escape(prefix) + r"([1-9][0-9]*)", release["tag_name"])
+            tag = release.get("tag_name")
+            if not isinstance(tag, str):
+                raise ValueError("Release API returned a missing or non-string tag_name")
+            match = re.fullmatch(re.escape(prefix) + r"([1-9][0-9]*)", tag)
             if not match:
                 continue
             n = int(match.group(1))
@@ -48,6 +55,15 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(plan([[draft, public]], "v1.2.3", 1, "new", True)["build"])
         self.assertEqual(plan([[draft, public]], "v1.2.3", 1, "new", False)["tag"], draft["tag_name"])
         self.assertEqual(plan([[public]], "v1.2.3", 1, "new", False)["tag"], "zh-v1.2.3-r2")
+
+    def test_invalid_inputs(self):
+        for minimum in (0, -1, True, 1.5):
+            with self.subTest(minimum=minimum), self.assertRaises(ValueError):
+                plan([[]], "v1.2.3", minimum, "new", True)
+        with self.assertRaisesRegex(ValueError, "tag_name"):
+            plan([[{"tag_name": None}]], "v1.2.3", 1, "new", True)
+        with self.assertRaisesRegex(ValueError, "stable upstream"):
+            plan([[]], "v1.2.3-rc1", 1, "new", True)
 
     def test_empty_bump_duplicates(self):
         self.assertTrue(plan([[]], "v1.2.3", 1, "new", True)["sync"])

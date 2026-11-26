@@ -6,7 +6,9 @@ on:
       - 'localization/zh-CN/**'
       - '!localization/zh-CN/README.md'
       - '!localization/zh-CN/translate.test.ts'
-      - '!localization/zh-CN/LICENSE-dictionary'
+      - '!localization/zh-CN/release-plan.py'
+      - '!localization/zh-CN/resolve-upstream.sh'
+      - '!localization/zh-CN/verify-native.py'
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
@@ -37,6 +39,7 @@ jobs:
           set -euo pipefail
           gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main
   prepare:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
@@ -128,6 +131,14 @@ jobs:
           fi
           if [[ -n "$state" ]]; then
             jq -e 'all(.assets[]; IN("omp-windows-x64.exe", "LICENSE", "LICENSE-dictionary", "THIRD-PARTY-NOTICES.txt", "SHA256SUMS.txt"))' <<< "$state" >/dev/null || { echo "::error::Unexpected existing draft assets; manual review required"; exit 1; }
+          fi
+          # Refuse orphan tags pointing at a different source commit.
+          git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" > "$RUNNER_TEMP/zh-tag-refs"
+          existing_tag=$(awk '/\^\{\}$/ { print $1; found=1 } END { if (!found) exit 1 }' "$RUNNER_TEMP/zh-tag-refs" || true)
+          if [[ -z "$existing_tag" ]]; then existing_tag=$(awk 'NR == 1 { print $1 }' "$RUNNER_TEMP/zh-tag-refs"); fi
+          if [[ -n "$existing_tag" && "$existing_tag" != "$GITHUB_SHA" ]]; then
+            echo "::error::Existing release tag targets a different overlay commit."
+            exit 1
           fi
           cp LICENSE dist/LICENSE
           cp localization/zh-CN/LICENSE-dictionary dist/LICENSE-dictionary
