@@ -225,6 +225,22 @@ async function main() {
 	src = replaceExactly(src, "async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {",
 		"async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {\n\tif (process.env.PI_COMPILED === \"true\") return;", startup);
 	ast(src, startup); await writeFile(startup, src);
+	// Extend the existing compiled distribution smoke path; no new public command.
+	const cliSource = join(root, "packages/coding-agent/src/cli.ts");
+	src = await readFile(cliSource, "utf8");
+	const smokeAnchor = '\tprocess.stdout.write("smoke-test: ok\\n");';
+	const smokeChecks = [
+		'\tconst { getTemplate } = await import("./export/html/index");',
+		'\tconst template = getTemplate();',
+		'\tif (!template.includes(\'window.addEventListener("DOMContentLoaded",function(){\') || template.includes(\'src="https://build.stencil.so/web/omp/\')) throw new Error("Localized inline viewer missing");',
+		'\tconst { getAllSettingDefs } = await import("./config/settings-defs");',
+		'\tconst defs = getAllSettingDefs([{ path: "audit.setting", type: "enum", defaultValue: "yolo", enumValues: ["yolo"], ui: { tab: "interaction", label: "Yolo", description: "Yolo", options: [{ value: "yolo", label: "Yolo" }] } }]);',
+		'\tconst def = defs[0];',
+		'\tif (!def || def.path !== "audit.setting" || def.defaultValue !== "yolo" || def.label !== "Yolo（全自动）" || def.description !== "Yolo（全自动）" || def.type !== "submenu" || def.options[0]?.value !== "yolo" || def.options[0]?.label !== "Yolo（全自动）") throw new Error("Localized settings projection failed");',
+		'\tprocess.stdout.write("localization-smoke: ok\\n");',
+	].join("\n");
+	src = replaceExactly(src, smokeAnchor, smokeChecks + "\n" + smokeAnchor, cliSource);
+	ast(src, cliSource); await writeFile(cliSource, src);
 	if (count < 50) throw new Error("Localization coverage unexpectedly low: " + count);
 	console.log(JSON.stringify({ translatedLiterals: count, modifiedFiles: modified, dictionaryEntries: Object.keys(dict).length }));
 }

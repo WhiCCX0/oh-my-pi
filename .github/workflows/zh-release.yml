@@ -5,6 +5,8 @@ on:
     paths:
       - 'localization/zh-CN/**'
       - '!localization/zh-CN/README.md'
+      - '!localization/zh-CN/translate.test.ts'
+      - '!localization/zh-CN/LICENSE-dictionary'
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
@@ -146,8 +148,19 @@ jobs:
           package="@oh-my-pi/pi-natives-win32-x64@$VERSION"
           (
             cd "$dir"
-            printf '{"private":true,"name":"native-verification","version":"1.0.0"}\n' > package.json
-            npm install --package-lock-only --force --ignore-scripts --no-audit --no-fund --save-exact "$package"
+            # audit signatures loads the actual metadata tree, not only a lockfile.
+            # Construct the one trusted dependency descriptor without unpacking any code.
+            node - "$VERSION" <<'NODE'
+            const fs = require("node:fs");
+            const name = "@oh-my-pi/pi-natives-win32-x64";
+            const version = process.argv[2];
+            if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Invalid native version");
+            fs.writeFileSync("package.json", JSON.stringify({
+              name: "native-verification", version: "1.0.0", private: true, dependencies: {[name]: version}
+            }));
+            fs.mkdirSync("node_modules/" + name, {recursive: true});
+            fs.writeFileSync("node_modules/" + name + "/package.json", JSON.stringify({name, version}));
+            NODE
             npm audit signatures --json --include-attestations > audit.json
             npm pack --ignore-scripts --json "$package" > pack.json
           )
@@ -238,11 +251,14 @@ jobs:
         run: |
           set -euo pipefail
           releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
-          state=$(jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag) | {isDraft: .draft, targetCommitish: .target_commitish}] | if length > 1 then error("Duplicate release tag") else first // empty end' <<< "$releases")
+          state=$(jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag) | {isDraft: .draft, targetCommitish: .target_commitish, assets: [.assets[].name]}] | if length > 1 then error("Duplicate release tag") else first // empty end' <<< "$releases")
           if [[ -n "$state" ]] && [[ $(jq -r .isDraft <<< "$state") == false ]]; then exit 0; fi
           if [[ -n "$state" ]] && [[ $(jq -r .targetCommitish <<< "$state") != "$GITHUB_SHA" ]]; then
             echo "::error::Existing draft targets a different overlay commit; bump ZH_REVISION or review the draft."
             exit 1
+          fi
+          if [[ -n "$state" ]]; then
+            jq -e 'all(.assets[]; IN("omp-windows-x64.exe", "LICENSE", "LICENSE-dictionary", "THIRD-PARTY-NOTICES.txt", "SHA256SUMS.txt"))' <<< "$state" >/dev/null || { echo "::error::Unexpected existing draft assets; manual review required"; exit 1; }
           fi
           cp LICENSE dist/LICENSE
           cp localization/zh-CN/LICENSE-dictionary dist/LICENSE-dictionary
