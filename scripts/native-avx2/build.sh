@@ -35,6 +35,22 @@ mkdir -- "$ARTIFACTS"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+TRACE="${OMP_NATIVE_TRACE:-false}"
+case "$TRACE" in
+  true|1)
+    command -v strace >/dev/null || fail "strace is required in compiler evidence mode"
+    trace_rc="$TMP/trace.bazelrc"
+    cp "$OMP_BAZEL_RC" "$trace_rc"
+    # Batch mode makes the Bazel server a child of strace. Disable shared
+    # caches so the traced build actually executes compiler subprocesses.
+    printf '\nstartup --batch\ncommon --disk_cache=\ncommon --remote_cache=\n' >> "$trace_rc"
+    OMP_BAZEL_RC="$trace_rc"
+    TRACE=true
+    ;;
+  false|0) TRACE=false ;;
+  *) fail "OMP_NATIVE_TRACE must be true/false or 1/0" ;;
+esac
+
 echo "=== A0: official npm baseline ==="
 mkdir -p "$ARTIFACTS/A0-official-baseline"
 VERIFY_SCRIPT="${OMP_NATIVE_VERIFY_SCRIPT:?Set OMP_NATIVE_VERIFY_SCRIPT to the pinned formal release verifier}"
@@ -76,7 +92,26 @@ build_native() {
   mkdir -p "$dest"
   (
     cd "$SOURCE"
-    OMP_BAZEL_RC="$OMP_BAZEL_RC" bun scripts/bazel-natives.ts "$target" --dest "$dest" -- --jobs=2
+    if [[ "$TRACE" == true ]]; then
+      local label variant trace_dir
+      label="$(basename "$dest")"
+      variant=modern
+      [[ "$target" != *-baseline ]] || variant=baseline
+      trace_dir="$TMP/trace-$label"
+      mkdir "$trace_dir"
+      # Reset Bazel's local action cache; the output must not be a cache hit.
+      bazelisk --bazelrc="$OMP_BAZEL_RC" clean
+      # Local spawn strategy is restricted to this disposable, read-only
+      # experimental runner so ptrace observes actual build-script children.
+      OMP_BAZEL_RC="$OMP_BAZEL_RC" strace -ff -qq -s 65536 \
+        -e trace=execve,execveat,clone,clone3,fork,vfork -o "$trace_dir/exec" \
+        bun scripts/bazel-natives.ts "$target" --dest "$dest" -- --jobs=2 --spawn_strategy=local --remote_accept_cached=false
+      python3 "$ROOT/scripts/native-avx2/check-compiler-trace.py" --input-dir "$trace_dir" --variant "$variant" \
+        --output "$ARTIFACTS/compiler-trace-$label.json"
+      rm -rf "$trace_dir"
+    else
+      OMP_BAZEL_RC="$OMP_BAZEL_RC" bun scripts/bazel-natives.ts "$target" --dest "$dest" -- --jobs=2
+    fi
   )
 }
 

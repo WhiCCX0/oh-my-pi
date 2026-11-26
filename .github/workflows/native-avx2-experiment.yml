@@ -2,6 +2,11 @@ name: Windows x64 native ISA experiment
 
 on:
   workflow_dispatch:
+    inputs:
+      trace:
+        description: Collect actual compiler subprocess evidence (fresh builds)
+        type: boolean
+        default: true
   push:
     branches: [experiment/native-avx2]
     paths:
@@ -20,6 +25,8 @@ jobs:
     if: github.ref == 'refs/heads/experiment/native-avx2'
     runs-on: ubuntu-22.04
     timeout-minutes: 240
+    env:
+      OMP_NATIVE_TRACE: ${{ github.event_name == 'push' || inputs.trace }}
     outputs:
       artifact_id: ${{ steps.native_upload.outputs.artifact-id }}
       artifact_digest: ${{ steps.native_upload.outputs.artifact-digest }}
@@ -92,6 +99,17 @@ jobs:
           echo "bun: $(bun --version)"
           echo "bazelisk: $(bazelisk --version)"
           echo "runner VMON_CI: ${VMON_CI:-unset}"
+
+      - name: Prepare compiler trace utility
+        if: env.OMP_NATIVE_TRACE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends strace
+          fi
+          strace --version
 
       - name: Build the four experiment groups
         shell: bash
