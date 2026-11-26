@@ -130,6 +130,18 @@ jobs:
           bun ./.zh-build/translate.ts
           bun --cwd=packages/collab-web run gen:export-viewer --write
           bun ./.zh-build/embed-viewer.ts
+          # Experiment-only overlay on disposable source: log the actual loaded
+          # path (after validated dlopen), without modifying upstream files in git.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("packages/natives/native/loader-state.js")
+          s = p.read_text()
+          anchor = 'loadedAddon = describeLoadedAddon(bindings, candidate, ctx);'
+          if s.count(anchor) != 1:
+              raise ValueError("Native loader status anchor changed")
+          s = s.replace(anchor, anchor + '\n\t\t\tstartupMarker("native:loadedPath:" + path.resolve(loadedAddon.path));')
+          p.write_text(s)
+          PY
           git diff --check
       - name: Install exactly one verified addon
         working-directory: source
@@ -156,7 +168,8 @@ jobs:
           bun run ci:release:build-binaries
           mkdir -p ../dist
           cp packages/coding-agent/binaries/omp-windows-x64.exe "../dist/$GROUP.exe"
-          jq --arg overlay "4960979f9f70fc00e673b648d8d70fda23973fc5" '.experiment.localization_commit = $overlay' ../native-artifacts/manifest.json > "../dist/$GROUP-native-manifest.json"
+          jq -e '.experiment.localization_commit == "4960979f9f70fc00e673b648d8d70fda23973fc5"' ../native-artifacts/manifest.json >/dev/null
+          cp ../native-artifacts/manifest.json "../dist/$GROUP-native-manifest.json"
           cp LICENSE "../dist/$GROUP-LICENSE"
           cp .zh-build/LICENSE-dictionary "../dist/$GROUP-LICENSE-dictionary"
           (cd ../dist && sha256sum "$GROUP.exe" > "$GROUP.sha256")
@@ -201,6 +214,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           artifact-ids: ${{ steps.artifact.outputs.id }}
+          merge-multiple: true
       - name: Validate EXE and exact loaded addon on Windows
         shell: pwsh
         env:
@@ -240,6 +254,10 @@ jobs:
             if ($log -notmatch 'native-ok' -or $markers.Count -ne 1 -or $done.Count -ne 1 -or $done[0].Index -le $markers[0].Index -or $markers[0].Groups[1].Value -ne "pi_natives.win32-x64-$env:VARIANT.node") { throw "Unexpected native loader output: $log" }
             $addons = @(Get-ChildItem -LiteralPath $env:PI_NATIVES_DIR -Recurse -Filter '*.node' -File)
             if ($addons.Count -ne 1 -or $addons[0].Name -ne "pi_natives.win32-x64-$env:VARIANT.node") { throw "Expected exactly one extracted addon of the correct variant" }
+            $paths = @([regex]::Matches($log, '(?m)^\[startup\] native:loadedPath:([^\r\n]+)\r?$'))
+            if ($paths.Count -ne 1 -or $paths[0].Index -le $markers[0].Index -or $paths[0].Index -ge $done[0].Index) { throw 'Missing exact loaded native path' }
+            $loadedPath = (Resolve-Path -LiteralPath $paths[0].Groups[1].Value).Path
+            if (-not [string]::Equals($loadedPath, $addons[0].FullName, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native loaded path mismatch' }
             $manifest = Get-Content -Raw "$env:GROUP-native-manifest.json" | ConvertFrom-Json -AsHashtable
             $hash = (Get-FileHash -LiteralPath $addons[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($hash -ne $manifest.experiment.groups[$env:GROUP].sha256) { throw "Loaded addon hash mismatch" }

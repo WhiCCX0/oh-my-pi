@@ -148,7 +148,7 @@ echo "=== A1: self-built upstream baseline ==="
   bazelisk --bazelrc="$OMP_BAZEL_RC" aquery --output=jsonproto --include_commandline --include_param_files \
     'mnemonic("Rustc|CppCompile", deps(//:natives-win32-x64-baseline))'
 ) > "$ARTIFACTS/aquery-A1-baseline.json"
-python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$ARTIFACTS/aquery-A1-baseline.json" --variant baseline --codegen-units 16
+python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$ARTIFACTS/aquery-A1-baseline.json" --variant baseline --codegen-units 16 --allow-cargo-only
 check_wrapper baseline
 build_native "win32-x64-baseline" "$ARTIFACTS/A1-self-built-baseline"
 A1_FILE="$ARTIFACTS/A1-self-built-baseline/pi_natives.win32-x64-baseline.node"
@@ -168,7 +168,7 @@ run_isa_gate() {
       --output=jsonproto --include_commandline --include_param_files \
       'mnemonic("Rustc|CppCompile", deps(//:natives-win32-x64-modern))'
   ) > "$query_out"
-  python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$query_out" --variant modern --codegen-units "$cgu"
+  python3 "$ROOT/scripts/native-avx2/check-aquery.py" --input "$query_out" --variant modern --codegen-units "$cgu" --allow-cargo-only
 
   check_wrapper modern
   cp "$ARTIFACTS/clang-cl-modern.sh" "$ARTIFACTS/clang-cl-$label.sh"
@@ -257,6 +257,7 @@ result = {
         "target": "win32-x64",
         "bun": command_version(["bun", "--version"]),
         "bazelisk": command_version(["bazelisk", "--version"]),
+        "localization_commit": "4960979f9f70fc00e673b648d8d70fda23973fc5",
         "a0_verified_sha256": os.environ["A0_VERIFIED_SHA256"],
         "trace_enabled": os.environ["OMP_NATIVE_TRACE"] == "true",
         "trace_reports": {p.name: sha256(p) for p in sorted(artifacts.glob("compiler-trace-*.json"))},

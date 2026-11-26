@@ -52,6 +52,7 @@ class GateTests(unittest.TestCase):
         graph = fixture()
         graph["actions"].pop()
         self.assertTrue(any("CppCompile" in e for e in gate.inspect(graph, "modern", 16)[0]))
+        self.assertEqual(gate.inspect(graph, "modern", 16, allow_cargo_only=True)[0], [])
 
     def test_unexpanded_param(self):
         graph = fixture()

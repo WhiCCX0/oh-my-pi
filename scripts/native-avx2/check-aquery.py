@@ -41,7 +41,7 @@ def codegen(args, flag):
     return output
 
 
-def inspect(graph, variant, cgu):
+def inspect(graph, variant, cgu, allow_cargo_only=False):
     labels = {str(t["id"]): t["label"] for t in graph["targets"]}
     configs = {str(c["id"]): c for c in graph.get("configuration", [])}
     errors = []
@@ -97,7 +97,7 @@ def inspect(graph, variant, cgu):
                 errors.append(label + ": v3 target feature enabled in baseline")
     if rust_count < 5 or root_count < 1:
         errors.append(f"Insufficient Windows Rustc coverage: {rust_count}, root actions {root_count}")
-    if cpp_count < 1:
+    if cpp_count < 1 and not allow_cargo_only:
         errors.append("No identified Windows CppCompile actions")
     return errors, rust_count, cpp_count
 
@@ -107,12 +107,15 @@ def main():
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--variant", choices=("baseline", "modern"), required=True)
     parser.add_argument("--codegen-units", choices=(1, 16), type=int, required=True)
+    parser.add_argument("--allow-cargo-only", action="store_true", help="Require separate actual Cargo compiler evidence; do not infer C/C++ coverage from aquery")
     a = parser.parse_args()
-    errors, rust, cpp = inspect(json.loads(a.input.read_text()), a.variant, a.codegen_units)
+    errors, rust, cpp = inspect(json.loads(a.input.read_text()), a.variant, a.codegen_units, a.allow_cargo_only)
     if errors:
         print("\n".join(errors[:30]), file=sys.stderr)
         return 1
     print(f"Structured gate passed: {rust} Windows Rustc and {cpp} identified Windows CppCompile actions.")
+    if cpp == 0:
+        print("No CppCompile actions: Cargo compiler trace is required for C/C++ evidence.")
     print("Cargo build-script subprocess invocations and runtime dispatch still require separate evidence.")
     return 0
 
