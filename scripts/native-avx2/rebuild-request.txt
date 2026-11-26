@@ -1,1 +1,1 @@
-2026-11-26: full audited rebuild with pinned npm provenance, same-run packaging and EXE attestations
+2026-11-26: fresh traced compiler-child evidence for A1/B/C; verified A0, same-run signed EXE packaging and Windows loader checks
