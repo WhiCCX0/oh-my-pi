@@ -1,0 +1,200 @@
+name: Package Windows x64 ISA experiment EXEs
+on:
+  push:
+    branches: [experiment/native-avx2]
+    paths:
+      - '.github/workflows/native-avx2-package.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: native-avx2-package
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.ref == 'refs/heads/experiment/native-avx2'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: A0
+            folder: A0-official-baseline
+            variant: baseline
+          - group: A1
+            folder: A1-self-built-baseline
+            variant: baseline
+          - group: B
+            folder: B-v3-thin-cgu16
+            variant: modern
+          - group: C
+            folder: C-v3-thin-cgu1
+            variant: modern
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 165b611c31fa04c8899767774e46cae232ba0c03
+          path: overlay
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: can1357/oh-my-pi
+          ref: b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          path: source
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: native-avx2-v19.2.1-45804292772
+          run-id: 45804292772
+          github-token: ${{ github.token }}
+          path: native-artifacts
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.5'
+      - name: Verify native input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GROUP: ${{ matrix.group }}
+          FOLDER: ${{ matrix.folder }}
+          VARIANT: ${{ matrix.variant }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/45804292772" --jq .conclusion)" = success
+          test "$(git -C source rev-parse HEAD)" = b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          test "$(git -C overlay rev-parse HEAD)" = 165b611c31fa04c8899767774e46cae232ba0c03
+          (
+            cd native-artifacts
+            sha256sum --check SHA256SUMS.txt
+            jq -e '.source.commit == "b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac" and .experiment.workflow_commit == "546b5b8987ef780af269d7786802bafae601f655"' manifest.json
+            file="$FOLDER/pi_natives.win32-x64-$VARIANT.node"
+            test "$(jq -r --arg g "$GROUP" '.experiment.groups[$g].file' manifest.json)" = "$file"
+            test "$(sha256sum "$file" | cut -d' ' -f1)" = "$(jq -r --arg g "$GROUP" '.experiment.groups[$g].sha256' manifest.json)"
+          )
+      - name: Install locked dependencies and apply identical localization
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          cp -R ../overlay/localization/zh-CN .zh-build
+          bun test ./.zh-build/translate.test.ts
+          bun ./.zh-build/translate.ts
+          bun --cwd=packages/collab-web run gen:export-viewer --write
+          bun ./.zh-build/embed-viewer.ts
+          git diff --check
+      - name: Install exactly one verified addon
+        working-directory: source
+        env:
+          FOLDER: ${{ matrix.folder }}
+          VARIANT: ${{ matrix.variant }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir=packages/natives/native
+          find "$dir" -maxdepth 1 -type f -name '*.node' -delete
+          file="pi_natives.win32-x64-$VARIANT.node"
+          cp "../native-artifacts/$FOLDER/$file" "$dir/$file"
+          test "$(find "$dir" -maxdepth 1 -name '*.node' | wc -l)" -eq 1
+          cmp "../native-artifacts/$FOLDER/$file" "$dir/$file"
+      - name: Package standalone EXE
+        working-directory: source
+        env:
+          RELEASE_TARGETS: win32-x64
+          GROUP: ${{ matrix.group }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run ci:release:build-binaries
+          mkdir -p ../dist
+          cp packages/coding-agent/binaries/omp-windows-x64.exe "../dist/$GROUP.exe"
+          cp ../native-artifacts/manifest.json "../dist/$GROUP-native-manifest.json"
+          cp LICENSE "../dist/$GROUP-LICENSE"
+          cp .zh-build/LICENSE-dictionary "../dist/$GROUP-LICENSE-dictionary"
+          (cd ../dist && sha256sum "$GROUP.exe" > "$GROUP.sha256")
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: experiment-exe-${{ matrix.group }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+  smoke:
+    needs: package
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: A0
+            variant: baseline
+          - group: A1
+            variant: baseline
+          - group: B
+            variant: modern
+          - group: C
+            variant: modern
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: experiment-exe-${{ matrix.group }}
+      - name: Validate EXE and exact loaded addon on Windows
+        shell: pwsh
+        env:
+          GROUP: ${{ matrix.group }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD "$env:GROUP.exe"
+          $root = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $root | Out-Null
+          try {
+            foreach ($key in @('HOME','USERPROFILE','LOCALAPPDATA','APPDATA','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_STATE_HOME','XDG_CONFIG_HOME','PI_CODING_AGENT_DIR','PI_NATIVES_DIR','TEMP','TMP')) {
+              $value = Join-Path $root $key
+              New-Item -ItemType Directory -Path $value -Force | Out-Null
+              [Environment]::SetEnvironmentVariable($key,$value,'Process')
+            }
+            $env:PI_NATIVE_VARIANT = $env:VARIANT
+            $env:PI_DEBUG_STARTUP = '1'
+            $version = & $exe --version
+            if ($LASTEXITCODE -ne 0 -or "$version" -notmatch '19\.2\.1') { throw "Wrong EXE version: $version" }
+            $result = & $exe bash -c 'printf "native-ok\n"' 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Native shell failed: $result" }
+            $log = $result | Out-String
+            if ($log -notmatch 'native-ok' -or $log -notmatch 'native:loadNative:done' -or $log -notmatch "native:require:pi_natives\.win32-x64-$env:VARIANT\.node") { throw "Unexpected native loader output: $log" }
+            $addons = @(Get-ChildItem -LiteralPath $env:PI_NATIVES_DIR -Recurse -Filter '*.node' -File)
+            if ($addons.Count -ne 1) { throw "Expected exactly one extracted addon" }
+            $manifest = Get-Content -Raw "$env:GROUP-native-manifest.json" | ConvertFrom-Json -AsHashtable
+            $hash = (Get-FileHash -LiteralPath $addons[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $manifest.experiment.groups[$env:GROUP].sha256) { throw "Loaded addon hash mismatch" }
+            Write-Host "Verified exact $env:GROUP native addon: $hash"
+          } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
+  collect:
+    needs: [package, smoke]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: experiment-exe-*
+          merge-multiple: true
+          path: dist
+      - name: Check all four EXEs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for group in A0 A1 B C; do
+            test -s "$group.exe"
+            sha256sum -c "$group.sha256"
+          done
+          sha256sum A0.exe A1.exe B.exe C.exe > SHA256SUMS.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OMP-AVX2-four-verified-EXEs
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
