@@ -120,7 +120,7 @@ def main() -> int:
                 ),
                 (
                     '"cflags": ["-msse4.1", "-msse4.2"],\n',
-                    '"cflags": ["-march=x86-64-v3"],\n',
+                    '"cflags": ["/clang:-march=x86-64-v3"],\n',
                     "set clang-cl C/C++ ISA",
                 ),
                 (

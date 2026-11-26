@@ -24,6 +24,8 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
 }
 $repoRoot = $repoRoot.Trim()
 $artifactRoot = (Resolve-Path -LiteralPath $ArtifactsDir).Path
+$manifest = Get-Content -Raw -LiteralPath (Join-Path $artifactRoot "manifest.json") | ConvertFrom-Json -AsHashtable
+if ($manifest.source.commit -ne $TagCommit) { throw "Artifact source commit mismatch" }
 
 $groups = @{
     A0 = @{
@@ -53,6 +55,8 @@ foreach ($key in $groups.Keys) {
     if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
         throw "Missing $key addon: $candidate"
     }
+    $actualHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $manifest.experiment.groups[$key].sha256) { throw "Artifact checksum mismatch: $key" }
 }
 
 if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
@@ -93,6 +97,7 @@ if ($missingFeatures.Count -gt 0) {
 
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $bunVersion = (& bun --version 2>&1 | Out-String).Trim()
+if ($bunVersion -ne "1.4.5") { throw "Use Bun 1.4.5 for the pinned experiment; found $bunVersion" }
 $rgVersion = (& rg --version 2>&1 | Select-Object -First 1 | Out-String).Trim()
 $powerPlan = (& powercfg /getactivescheme 2>&1 | Out-String).Trim()
 
@@ -263,6 +268,7 @@ finally {
         }
     }
 
+    Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter ("omp-native-cache-" + $runId + "-*") | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     if ($worktreeAdded) {
         & git -C $repoRoot worktree remove --force $worktree
         if ($LASTEXITCODE -ne 0) {

@@ -2,6 +2,11 @@ name: Windows x64 native ISA experiment
 
 on:
   workflow_dispatch:
+  push:
+    branches: [experiment/native-avx2]
+    paths:
+      - 'scripts/native-avx2/**'
+      - '.github/workflows/native-avx2-experiment.yml'
 
 permissions:
   contents: read
@@ -14,7 +19,7 @@ jobs:
   build:
     name: Build A0 / A1 / B / C (Windows x64)
     if: github.ref == 'refs/heads/experiment/native-avx2'
-    runs-on: vmon-large/from=omp-ci
+    runs-on: ubuntu-22.04
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -27,9 +32,29 @@ jobs:
           path: upstream-source
           persist-credentials: false
 
-      - name: Compose Bazel cache configuration
-        id: bazel-cache
-        uses: ./.github/actions/bazel-cache
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.5'
+
+      - name: Install Bazelisk and prepare local cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v bazelisk >/dev/null; then
+            npm install --global @bazel/bazelisk
+          fi
+          mkdir -p "$HOME/.cache/omp-avx2-disk"
+          printf 'common --disk_cache=%s\n' "$HOME/.cache/omp-avx2-disk" > "$RUNNER_TEMP/omp-avx2.bazelrc"
+          df -h
+          free -h
+
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: |
+            ~/.cache/omp-avx2-disk
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: native-avx2-v19.2.1-linux-v1
 
       - name: Verify runner and source pin
         shell: bash
@@ -51,7 +76,7 @@ jobs:
         shell: bash
         env:
           OMP_SOURCE_DIR: ${{ github.workspace }}/upstream-source
-          OMP_BAZEL_RC: ${{ steps.bazel-cache.outputs.rc }}
+          OMP_BAZEL_RC: ${{ runner.temp }}/omp-avx2.bazelrc
         run: |
           set -euo pipefail
           if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then
@@ -60,6 +85,7 @@ jobs:
           bash scripts/native-avx2/build.sh
 
       - name: Upload native addons and audit evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v8.0.1
         with:
           name: native-avx2-v19.2.1-${{ github.run_id }}

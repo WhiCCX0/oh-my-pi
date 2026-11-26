@@ -29,11 +29,11 @@ The Windows C/C++ sources are not all represented as top-level Bazel `CppCompile
 
 ## Build
 
-The manual workflow is deliberately restricted to the `experiment/native-avx2` branch and runs on the repository's `vmon-large/from=omp-ci` runner with the existing `.github/actions/bazel-cache`. The regular GitHub-hosted runner is not used for these Bazel cross-builds.
+The workflow is restricted to the `experiment/native-avx2` branch and triggers on experiment-file pushes. It uses a GitHub-hosted Ubuntu 22.04 runner with a local Bazel disk cache and two build jobs. Cold builds can exceed disk, memory or time limits; incomplete artifacts are diagnostic only.
 
-1. Open **Actions → Windows x64 native ISA experiment**.
-2. Select branch `experiment/native-avx2`.
-3. Run the workflow and wait for the artifact upload.
+1. Open the branch's **Windows x64 native ISA experiment** Actions run.
+2. Confirm the workflow completed successfully.
+3. Download the complete artifact only after all four groups pass.
 4. Download and extract `native-avx2-v19.2.1-<run_id>`.
 
 The artifact contains the four `.node` files, SHA-256 checksums, the exact source commit, Bazel/aquery evidence, the generated clang-cl wrapper, and a modern-only embedding check.

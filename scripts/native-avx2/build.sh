@@ -37,6 +37,8 @@ mkdir -p "$ARTIFACTS/A0-official-baseline"
 npm pack --ignore-scripts --json --pack-destination "$TMP" "@oh-my-pi/pi-natives-win32-x64@$VERSION" > "$TMP/npm-pack.json"
 TARBALL="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(p[0].filename)' "$TMP/npm-pack.json")"
 test -n "$TARBALL" || fail "npm pack returned no tarball"
+INTEGRITY="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))[0].integrity' "$TMP/npm-pack.json")"
+[[ "$INTEGRITY" == "sha512-$(openssl dgst -sha512 -binary "$TMP/$TARBALL" | openssl base64 -A)" ]] || fail "A0 npm tarball integrity mismatch"
 tar -xzf "$TMP/$TARBALL" -C "$TMP"
 node - "$TMP/package/package.json" <<'NODE'
 const p = require(process.argv[2]);
