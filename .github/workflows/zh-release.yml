@@ -121,16 +121,6 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.build == 'true'
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { target: win32-x64, native: win32-x64, asset: omp-windows-x64.exe }
-          - { target: win32-arm64, native: win32-arm64, asset: omp-windows-arm64.exe }
-          - { target: linux-x64, native: linux-x64, asset: omp-linux-x64 }
-          - { target: linux-arm64, native: linux-arm64, asset: omp-linux-arm64 }
-          - { target: darwin-x64, native: darwin-x64, asset: omp-darwin-x64 }
-          - { target: darwin-arm64, native: darwin-arm64, asset: omp-darwin-arm64 }
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -162,7 +152,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          NATIVE: ${{ matrix.native }}
+          NATIVE: win32-x64
         run: |
           set -euo pipefail
           dir=$(mktemp -d)
@@ -206,57 +196,40 @@ jobs:
       - name: Build standalone binary
         working-directory: source
         env:
-          RELEASE_TARGETS: ${{ matrix.target }}
+          RELEASE_TARGETS: win32-x64
         run: bun run ci:release:build-binaries
-      - name: Ad-hoc sign macOS binary using upstream procedure
-        if: startsWith(matrix.target, 'darwin-')
-        working-directory: source
-        run: bash scripts/ci-macos-sign.sh "packages/coding-agent/binaries/${{ matrix.asset }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: binary-${{ matrix.target }}
-          path: source/packages/coding-agent/binaries/${{ matrix.asset }}
+          name: binary-win32-x64
+          path: source/packages/coding-agent/binaries/omp-windows-x64.exe
           if-no-files-found: error
       - name: Upload native license notices for this target
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: native-notices-${{ matrix.target }}
+          name: native-notices-win32-x64
           path: source/packages/natives/native/THIRD-PARTY-NOTICES.txt
           if-no-files-found: error
   smoke:
     needs: [prepare, build]
     if: needs.prepare.outputs.build == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: windows-2025, target: win32-x64, asset: omp-windows-x64.exe }
-          - { runner: windows-11-arm, target: win32-arm64, asset: omp-windows-arm64.exe }
-          - { runner: ubuntu-22.04, target: linux-x64, asset: omp-linux-x64 }
-          - { runner: ubuntu-24.04-arm, target: linux-arm64, asset: omp-linux-arm64 }
-          - { runner: macos-15, target: darwin-arm64, asset: omp-darwin-arm64 }
-          - { runner: macos-15-intel, target: darwin-x64, asset: omp-darwin-x64 }
-    runs-on: ${{ matrix.runner }}
+    runs-on: windows-2025
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: binary-${{ matrix.target }}
+          name: binary-win32-x64
       - name: Verify compiled version and Chinese help
         shell: bash
         env:
-          ASSET: ${{ matrix.asset }}
+          ASSET: omp-windows-x64.exe
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           chmod +x "$ASSET"
-          if [[ "$RUNNER_OS" == macOS ]]; then codesign --verify --strict --verbose=2 "$ASSET"; fi
           runtime_dir=$(mktemp -d)
           export HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg"
           mkdir -p "$HOME" "$XDG_DATA_HOME"
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            export USERPROFILE="$(cygpath -w "$HOME")" LOCALAPPDATA="$(cygpath -w "$runtime_dir/local")"
-            mkdir -p "$runtime_dir/local"
-          fi
+          export USERPROFILE="$(cygpath -w "$HOME")" LOCALAPPDATA="$(cygpath -w "$runtime_dir/local")"
+          mkdir -p "$runtime_dir/local"
           "./$ASSET" --version | grep -F "$VERSION"
           "./$ASSET" --help > help.txt
           grep -F '用法' help.txt
@@ -274,12 +247,11 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: binary-*
-          merge-multiple: true
+          name: binary-win32-x64
           path: dist
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: native-notices-*
+          name: native-notices-win32-x64
           path: legal
       - name: Publish immutable Chinese release
         shell: bash
@@ -298,19 +270,12 @@ jobs:
           fi
           cp LICENSE dist/LICENSE
           cp localization/zh-CN/LICENSE-dictionary dist/LICENSE-dictionary
-          {
-            echo "Third-party notices for the native addon packages used by this release."
-            for target in win32-x64 win32-arm64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
-              notice="legal/native-notices-$target/THIRD-PARTY-NOTICES.txt"
-              test -s "$notice"
-              printf '\n===== %s =====\n' "$target"
-              cat "$notice"
-            done
-          } > dist/THIRD-PARTY-NOTICES.txt
-          (cd dist && sha256sum omp-* > SHA256SUMS.txt)
-          printf '上游版本：v%s\n上游提交：%s\n汉化覆盖层提交：%s\n\n界面与帮助汉化，未覆盖的文字保留英文。Windows、Linux glibc、macOS 的 x64 与 arm64 均通过基础烟测。macOS 为 ad-hoc 签名。请从本仓库下载更新。\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_SHA" > notes.md
+          test -s legal/THIRD-PARTY-NOTICES.txt
+          cp legal/THIRD-PARTY-NOTICES.txt dist/THIRD-PARTY-NOTICES.txt
+          (cd dist && sha256sum omp-windows-x64.exe > SHA256SUMS.txt)
+          printf '上游版本：v%s\n上游提交：%s\n汉化覆盖层提交：%s\n\n界面与帮助汉化，未覆盖的文字保留英文。仅发布 Windows x64 独立二进制，已通过 Windows x64 基础烟测。请从本仓库下载更新。\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_SHA" > notes.md
           if [[ -z "$state" ]]; then
             gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG 简体中文版" --notes-file notes.md
           fi
-          gh release upload "$TAG" dist/* --clobber
+          gh release upload "$TAG" dist/omp-windows-x64.exe dist/LICENSE dist/LICENSE-dictionary dist/THIRD-PARTY-NOTICES.txt dist/SHA256SUMS.txt --clobber
           gh release edit "$TAG" --draft=false --notes-file notes.md

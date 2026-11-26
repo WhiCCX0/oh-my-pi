@@ -6,8 +6,8 @@
 - 英文回退；检查命令参数、URL 与命名占位符；不修改系统提示词、用户输入、模型返回、工具协议、JSON/RPC 字段、按键 ID。新增界面或动态模板可能仍为英文，不宣称全量汉化。
 - 无新增运行时依赖；使用上游已有 Babel parser。UI 常量在构建期替换，设置只在显示投影时 Map 查找。
 - 汉化二进制保留上游版本号，GitHub Release 使用 zh-vX.Y.Z-r1。编译版官方自更新禁用，避免被英文覆盖；升级从本仓库 Release 手动下载。
-- 使用官方同版本 npm native leaf（保留上游版本验证）和上游构建脚本；支持 Windows、Linux glibc、macOS 的 x64/arm64，全部六个目标在对应 GitHub 托管架构运行烟测。暂不发布 musl；macOS 采用 ad-hoc 签名，无 Developer ID 公证。
-- 发布需通过转换测试、构建、Linux/Windows/macOS 双架构烟测；附 SHA256 校验及上游版本、commit。无 npm 发布或官方发布凭据。
+- 使用官方同版本 npm native leaf（保留上游版本验证）和上游构建脚本；仅构建并发布 Windows x64 独立二进制，在 Windows x64 GitHub 托管 Runner 运行烟测。历史多平台发行保留。
+- 发布需通过转换测试、构建、Windows x64 烟测；附 SHA256 校验及上游版本、commit。无 npm 发布或官方发布凭据。
 
 词典基于 yebuwudong/omp-zh 的 dict.json 与 dict-extra.json（MIT，见 LICENSE-dictionary）；overrides.json 用于独立修订。不要添加机器标识的无条件替换。上游改动关键锚点时构建失败，需检查后修订。工作流每 6 小时及手动检查上游；同一发行标签不会覆盖。若需同一上游版本重发，将 workflow 的 ZH_REVISION 增加。
 
@@ -24,11 +24,11 @@
 - URL 指纹忽略句末标点，同时校验 CLI flags、printf 格式符及命名占位符；AST 解析错误附带源文件路径，编辑器会去重完全相同的范围并拒绝冲突范围。
 - JSX 显示属性使用 JavaScript 字符串表达式，双引号、反斜杠、换行及标记字符均由 JSON 编码保护。
 - Release 修订号在显式 push/dispatch 时自动寻找可用版本；定时任务遇到已发布版本则跳过。Bun 版本解析优先读取上游 CI，必要时回退 packageManager；原生包下载带重试和 SRI 校验。
-- 六个平台分别上传原生模块第三方声明，并合并到 Release 资产。
+- 仅上传本次 Windows x64 原生模块第三方声明，作为 Release 资产。
 - 上游继承的 CI 在 push main 时请求上游专用自托管 Runner，Fork 中可能长期排队；PR 路径仍使用 GitHub 托管 Runner。Stale 工作流则使用 GitHub 托管 Runner 且已成功执行，不应与 CI 队列问题混为一谈。为保持上游文件零修改，本覆盖层不改写这两个工作流。
 - embed-viewer.ts 只修改构建临时目录中的 HTML index 并生成内嵌 viewer 文本，不覆盖上游 viewer-html.ts。编译器将 process.env.PI_COMPILED 定义为 true，汉化二进制的官方自更新保护已生效。
 
 - 新增全词典回归测试：合并后的 6,000+ 条映射逐项校验 URL、CLI flags、printf 指令及命名占位符，防止后续词典更新引入不兼容翻译。
-- 正式发布工作流仅由 main 分支触发；验证分支不再消耗六平台构建资源。定时任务可恢复同一 main 提交上中断的 Release 草稿。
+- 正式发布工作流仅由 main 分支触发；验证分支不再触发正式构建。定时任务可恢复同一 main 提交上中断的 Release 草稿。
 
 - 上游 main 自动同步为独立的 `sync-upstream` 作业：使用 GitHub 原生非强制合并 API，不依赖发布版本是否变化；发生冲突时明确失败，不强推、不自动解决冲突。构建和发布仍使用本次运行固定的覆盖层提交与上游稳定 Tag，不受同步作业阻塞。
