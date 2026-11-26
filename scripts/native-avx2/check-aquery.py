@@ -21,6 +21,8 @@ def expanded_args(action):
                     raise ValueError("Recursive response file: " + path)
                 seen.add(path)
                 yield from expand(params[path], active | {path})
+            elif arg.startswith("@"):
+                raise ValueError("Unresolved response file: " + arg)
             else:
                 yield arg
     result = list(expand(action.get("arguments", []), set()))
@@ -56,7 +58,7 @@ def inspect(graph, variant, cgu):
             continue
         args = expanded_args(action)
         if mnemonic == "CppCompile":
-            if not any("msvc_cc" in arg and "clang-cl" in arg for arg in args):
+            if not args or not re.search(r"(?:^|/)\+?msvc_cc_repository\+msvc_cc/bin/clang-cl$", args[0]):
                 if "win32-x64" in config.get("platformName", ""):
                     errors.append(label + ": unexpected Windows C/C++ compiler")
                 continue
@@ -95,6 +97,8 @@ def inspect(graph, variant, cgu):
                 errors.append(label + ": v3 target feature enabled in baseline")
     if rust_count < 5 or root_count < 1:
         errors.append(f"Insufficient Windows Rustc coverage: {rust_count}, root actions {root_count}")
+    if cpp_count < 1:
+        errors.append("No identified Windows CppCompile actions")
     return errors, rust_count, cpp_count
 
 

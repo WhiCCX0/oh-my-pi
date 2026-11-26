@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 165b611c31fa04c8899767774e46cae232ba0c03
+          ref: 4960979f9f70fc00e673b648d8d70fda23973fc5
           path: overlay
           persist-credentials: false
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C source rev-parse HEAD)" = b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
-          test "$(git -C overlay rev-parse HEAD)" = 165b611c31fa04c8899767774e46cae232ba0c03
+          test "$(git -C overlay rev-parse HEAD)" = 4960979f9f70fc00e673b648d8d70fda23973fc5
           (
             cd native-artifacts
             sha256sum --check SHA256SUMS.txt
@@ -92,6 +92,33 @@ jobs:
             test "$(jq -r --arg g "$GROUP" '.experiment.groups[$g].file' manifest.json)" = "$file"
             test "$(sha256sum "$file" | cut -d' ' -f1)" = "$(jq -r --arg g "$GROUP" '.experiment.groups[$g].sha256' manifest.json)"
           )
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        if: matrix.group == 'A0'
+        with:
+          node-version: '24'
+      - name: Independently reverify official A0 on the separate packaging runner
+        if: matrix.group == 'A0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.17.0 --ignore-scripts --registry=https://registry.npmjs.org
+          root="$PWD"
+          dir=$(mktemp -d)
+          trap 'rm -rf "$dir"' EXIT
+          export npm_config_registry=https://registry.npmjs.org
+          export npm_config_userconfig="$dir/.npmrc" npm_config_globalconfig="$dir/global.npmrc"
+          (
+            cd "$dir"
+            node -e 'const fs=require("node:fs");const name="@oh-my-pi/pi-natives-win32-x64",version="19.2.1";fs.writeFileSync("package.json",JSON.stringify({name:"native-verification",version:"1.0.0",private:true,dependencies:{[name]:version}}));fs.mkdirSync("node_modules/"+name,{recursive:true});fs.writeFileSync("node_modules/"+name+"/package.json",JSON.stringify({name,version}));'
+            npm audit signatures --json --include-attestations > audit.json
+            npm pack --ignore-scripts --json '@oh-my-pi/pi-natives-win32-x64@19.2.1' > pack.json
+          )
+          tarball=$(jq -er '.[0].filename' "$dir/pack.json")
+          [[ "$tarball" =~ ^[A-Za-z0-9._-]+\.tgz$ ]]
+          python3 "$root/overlay/localization/zh-CN/verify-native.py" "$dir/$tarball" "$dir/audit.json" 19.2.1 b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac "$dir/verified"
+          cmp "$dir/verified/pi_natives.win32-x64-baseline.node" native-artifacts/A0-official-baseline/pi_natives.win32-x64-baseline.node
+          actual=$(sha256sum "$dir/verified/pi_natives.win32-x64-baseline.node" | cut -d' ' -f1)
+          jq -e --arg hash "$actual" '.experiment.a0_verified_sha256 == $hash and .experiment.groups.A0.sha256 == $hash' native-artifacts/manifest.json
       - name: Install locked dependencies and apply identical localization
         working-directory: source
         shell: bash
@@ -129,7 +156,7 @@ jobs:
           bun run ci:release:build-binaries
           mkdir -p ../dist
           cp packages/coding-agent/binaries/omp-windows-x64.exe "../dist/$GROUP.exe"
-          cp ../native-artifacts/manifest.json "../dist/$GROUP-native-manifest.json"
+          jq --arg overlay "4960979f9f70fc00e673b648d8d70fda23973fc5" '.experiment.localization_commit = $overlay' ../native-artifacts/manifest.json > "../dist/$GROUP-native-manifest.json"
           cp LICENSE "../dist/$GROUP-LICENSE"
           cp .zh-build/LICENSE-dictionary "../dist/$GROUP-LICENSE-dictionary"
           (cd ../dist && sha256sum "$GROUP.exe" > "$GROUP.sha256")
@@ -156,16 +183,36 @@ jobs:
           - group: C
             variant: modern
     steps:
+      - name: Resolve exact package artifact from this run
+        id: artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GROUP: ${{ matrix.group }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pages = gh api --paginate "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/artifacts?per_page=100" --jq '.artifacts[] | @json'
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact lookup failed' }
+          $all = @($pages | ForEach-Object { $_ | ConvertFrom-Json })
+          $matches = @($all | Where-Object { $_.name -eq "experiment-exe-$env:GROUP" -and -not $_.expired })
+          if ($matches.Count -ne 1 -or $matches[0].digest -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Expected one immutable package artifact' }
+          "id=$($matches[0].id)" >> $env:GITHUB_OUTPUT
+          "digest=$($matches[0].digest)" >> $env:GITHUB_OUTPUT
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: experiment-exe-${{ matrix.group }}
+          artifact-ids: ${{ steps.artifact.outputs.id }}
       - name: Validate EXE and exact loaded addon on Windows
         shell: pwsh
         env:
           GROUP: ${{ matrix.group }}
           VARIANT: ${{ matrix.variant }}
+          PACKAGE_ID: ${{ steps.artifact.outputs.id }}
+          PACKAGE_DIGEST: ${{ steps.artifact.outputs.digest }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $expectedNames = @("$env:GROUP.exe","$env:GROUP-native-manifest.json","$env:GROUP-LICENSE","$env:GROUP-LICENSE-dictionary","$env:GROUP.sha256")
+          $items = @(Get-ChildItem -LiteralPath $PWD -Force)
+          if ($items.Count -ne $expectedNames.Count -or @($items | Where-Object { $_.PSIsContainer -or $_.Name -cnotin $expectedNames }).Count) { throw 'Unexpected package contents' }
           $exe = Join-Path $PWD "$env:GROUP.exe"
           $root = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $root | Out-Null
@@ -196,41 +243,53 @@ jobs:
             $manifest = Get-Content -Raw "$env:GROUP-native-manifest.json" | ConvertFrom-Json -AsHashtable
             $hash = (Get-FileHash -LiteralPath $addons[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($hash -ne $manifest.experiment.groups[$env:GROUP].sha256) { throw "Loaded addon hash mismatch" }
+            $files = [ordered]@{}
+            foreach ($name in $expectedNames) { $files[$name] = (Get-FileHash -LiteralPath (Join-Path $PWD $name) -Algorithm SHA256).Hash.ToLowerInvariant() }
+            if ($files["$env:GROUP.exe"] -ne $expectedExe) { throw 'EXE changed after smoke' }
+            $receipt = [ordered]@{group=$env:GROUP;runId=$env:GITHUB_RUN_ID;sourceSha=$env:GITHUB_SHA;artifactId=$env:PACKAGE_ID;artifactDigest=$env:PACKAGE_DIGEST;files=$files;loadedAddonSha256=$hash}
+            $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PWD "smoke-receipt.json") -Encoding utf8NoBOM
             Write-Host "Verified exact $env:GROUP native addon: $hash"
           } finally {
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
           }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: smoke-receipt-${{ matrix.group }}
+          path: smoke-receipt.json
+          if-no-files-found: error
+          retention-days: 30
   collect:
     needs: [package, smoke]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          pattern: experiment-exe-*
-          merge-multiple: true
-          path: dist
-      - name: Check all four EXEs
+          persist-credentials: false
+      - name: Collect exactly the four smoke-accepted packages
         shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          for group in A0 A1 B C; do
-            test -s "$group.exe"
-            sha256sum -c "$group.sha256"
-          done
-          sha256sum A0.exe A1.exe B.exe C.exe > SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/native-avx2/collect-verified.py
       - name: Attest verified EXE checksums and native manifests
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
         with:
           subject-path: |
-            dist/*.exe
-            dist/*-native-manifest.json
+            dist/A0.exe
+            dist/A1.exe
+            dist/B.exe
+            dist/C.exe
+            dist/A0-native-manifest.json
+            dist/A1-native-manifest.json
+            dist/B-native-manifest.json
+            dist/C-native-manifest.json
             dist/SHA256SUMS.txt
+            dist/smoke-receipts.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: OMP-AVX2-four-verified-EXEs

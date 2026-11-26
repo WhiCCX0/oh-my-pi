@@ -27,6 +27,7 @@ SOURCE_VERSION="$(node -p 'require(process.argv[1]).version' "$SOURCE/packages/n
 [[ "$SOURCE_VERSION" == "$VERSION" ]] || fail "wrong natives package version: $SOURCE_VERSION"
 
 git -C "$SOURCE" diff --quiet && git -C "$SOURCE" diff --cached --quiet || fail "Upstream source has tracked modifications; use a fresh checkout"
+[[ -z "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" && ! -e "$SOURCE/.bazelrc.user" && ! -L "$SOURCE/.bazelrc.user" ]] || fail "Unexpected untracked source or local Bazel override"
 ARTIFACTS="$(realpath -m -- "$ARTIFACTS")"
 [[ "$ARTIFACTS" == "$ROOT/native-avx2-artifacts" ]] || fail "Refusing unexpected output directory: $ARTIFACTS"
 [[ ! -e "$ARTIFACTS" && ! -L "$ARTIFACTS" ]] || fail "Output already exists; move it aside explicitly: $ARTIFACTS"
@@ -80,6 +81,8 @@ python3 "$VERIFY_SCRIPT" "$TMP/$TARBALL" "$TMP/audit.json" "$VERSION" "$SOURCE_S
 cp "$TMP/audit.json" "$ARTIFACTS/A0-npm-provenance.json"
 A0_FILE="$TMP/verified/pi_natives.win32-x64-baseline.node"
 test -s "$A0_FILE" || fail "official npm package did not contain the expected baseline addon"
+A0_VERIFIED_SHA256="$(sha256sum "$A0_FILE" | cut -d' ' -f1)"
+export A0_VERIFIED_SHA256
 cp "$A0_FILE" "$ARTIFACTS/A0-official-baseline/"
 cp "$TMP/verified/THIRD-PARTY-NOTICES.txt" "$ARTIFACTS/A0-official-baseline/"
 if ! grep -aFq "PI_NATIVES_VERSION_STAMP:$VERSION" "$A0_FILE" && ! grep -aFq "__piNativesV19_2_1" "$A0_FILE"; then
@@ -187,6 +190,8 @@ build_native "win32-x64-modern" "$ARTIFACTS/C-v3-thin-cgu1"
 C_FILE="$ARTIFACTS/C-v3-thin-cgu1/pi_natives.win32-x64-modern.node"
 verify_stamp "$C_FILE"
 
+test "$(sha256sum "$ARTIFACTS/A0-official-baseline/pi_natives.win32-x64-baseline.node" | cut -d' ' -f1)" = "$A0_VERIFIED_SHA256" || fail "A0 changed after verification"
+export OMP_NATIVE_TRACE="$TRACE"
 echo "=== Verify isolated baseline and modern embedding ==="
 OMP_SOURCE_DIR="$SOURCE" bun "$ROOT/scripts/native-avx2/verify-embed.ts" "$ARTIFACTS/A0-official-baseline" baseline
 OMP_SOURCE_DIR="$SOURCE" bun "$ROOT/scripts/native-avx2/verify-embed.ts" "$ARTIFACTS/A1-self-built-baseline" baseline
@@ -252,6 +257,9 @@ result = {
         "target": "win32-x64",
         "bun": command_version(["bun", "--version"]),
         "bazelisk": command_version(["bazelisk", "--version"]),
+        "a0_verified_sha256": os.environ["A0_VERIFIED_SHA256"],
+        "trace_enabled": os.environ["OMP_NATIVE_TRACE"] == "true",
+        "trace_reports": {p.name: sha256(p) for p in sorted(artifacts.glob("compiler-trace-*.json"))},
         "groups": {},
     },
 }
@@ -265,6 +273,8 @@ for name, (relative, build, configuration) in groups.items():
         "sha256": sha256(file),
     }
 
+if result["experiment"]["trace_enabled"] and len(result["experiment"]["trace_reports"]) != 3:
+    raise ValueError("Missing traced compiler evidence")
 (artifacts / "manifest.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 PY
 

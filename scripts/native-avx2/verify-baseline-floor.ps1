@@ -60,6 +60,7 @@ try {
         $env:PI_DEBUG_STARTUP = '1'
         $exe = Join-Path $groupRoot "$group.exe"
         Copy-Item -LiteralPath $source -Destination $exe
+        if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected[$group]) { throw "$group copied EXE hash mismatch" }
         $version = & $exe --version 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?<![\d.])19\.2\.1(?![\d.])') { throw "$group version failed: $version" }
         $help = & $exe --help 2>&1 | Out-String

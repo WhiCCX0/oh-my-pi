@@ -3,7 +3,12 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ArtifactsDir,
 
-    [ValidateRange(1, 10)]
+    # Obtain this independently from a verified signed native manifest.
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[a-fA-F0-9]{64}$')]
+    [string]$ExpectedManifestSha256,
+
+    [ValidateSet(4, 8)]
     [int]$Rounds = 4,
 
     [ValidateRange(1, 500)]
@@ -24,7 +29,11 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
 }
 $repoRoot = $repoRoot.Trim()
 $artifactRoot = (Resolve-Path -LiteralPath $ArtifactsDir).Path
-$manifest = Get-Content -Raw -LiteralPath (Join-Path $artifactRoot "manifest.json") | ConvertFrom-Json -AsHashtable
+$manifestPath = Join-Path $artifactRoot "manifest.json"
+$manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
+$manifestHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes)).ToLowerInvariant()
+if ($manifestHash -ne $ExpectedManifestSha256.ToLowerInvariant()) { throw "Manifest does not match independently trusted SHA256" }
+$manifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json -AsHashtable
 if ($manifest.source.commit -ne $TagCommit) { throw "Artifact source commit mismatch" }
 
 $groups = @{
@@ -176,6 +185,7 @@ try {
             Get-ChildItem -LiteralPath $nativeDir -Filter "*.node" -File -ErrorAction SilentlyContinue |
                 Remove-Item -Force
             Copy-Item -LiteralPath $sourceFile -Destination $targetFile -Force
+            if ((Get-FileHash -LiteralPath $targetFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $manifest.experiment.groups[$key].sha256) { throw "Copied addon hash mismatch: $key" }
             $present = @(Get-ChildItem -LiteralPath $nativeDir -Filter "*.node" -File)
             if ($present.Count -ne 1 -or $present[0].Name -ne $group.File) {
                 throw "Physical isolation failed for $key; found: $($present.Name -join ', ')"
@@ -219,6 +229,7 @@ try {
             $signature = $matches -join ','
             if ($grepSignatures.ContainsKey($round) -and $grepSignatures[$round] -ne $signature) { throw "Grep correctness mismatch in round $round for $key" }
             $grepSignatures[$round] = $signature
+            if ($grepSignatures.ContainsKey(1) -and $grepSignatures[1] -ne $signature) { throw "Grep correctness changed across rounds" }
             $runRows.Add([pscustomobject]@{
                 Round = $round
                 Group = $key

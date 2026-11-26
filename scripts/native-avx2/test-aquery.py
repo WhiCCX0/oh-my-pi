@@ -44,6 +44,15 @@ class GateTests(unittest.TestCase):
         graph["actions"][2]["paramFiles"][0]["arguments"] += ["-Ctarget-feature=+avx2"]
         self.assertTrue(gate.inspect(graph, "baseline", 16)[0])
 
+    def test_unresolved_and_zero_cpp(self):
+        graph = fixture()
+        graph["actions"][0]["arguments"].append("@missing")
+        with self.assertRaisesRegex(ValueError, "Unresolved response"):
+            gate.inspect(graph, "modern", 16)
+        graph = fixture()
+        graph["actions"].pop()
+        self.assertTrue(any("CppCompile" in e for e in gate.inspect(graph, "modern", 16)[0]))
+
     def test_unexpanded_param(self):
         graph = fixture()
         graph["actions"][0]["arguments"] = ["wrapper"]
