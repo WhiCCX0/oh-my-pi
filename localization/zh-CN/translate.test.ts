@@ -97,3 +97,20 @@ test("every shipped dictionary entry preserves technical tokens", async () => {
 	}
 	expect(Object.keys(dictionary).length).toBeGreaterThan(6000);
 });
+
+test("shared command-help descriptions, nested JSX and fragments", () => {
+	const help = transform('export const x = {description: "Approve", name: "Deny"};', "packages/coding-agent/src/cli/command-help.ts", dict);
+	expect(help.source).toContain('description: "批准"');
+	expect(help.source).toContain('name: "Deny"');
+	const jsx = transform('const x = <item title={ok ? <span>Approve</span> : "Deny"}>{<>{"Approve"}</>}</item>;', "ui.tsx", dict);
+	expect(jsx.count).toBe(3);
+	expect(jsx.source).toContain('<span>{"批准"}</span>');
+	expect(jsx.source).toContain('<>{"批准"}</>');
+});
+test("ordered printf and numeric/dotted placeholders", () => {
+	const source = "Move %s to %d";
+	expect(lookup({[source]: "将 %d 移至 %s"}, source)).toBe(source);
+	expect(lookup({"Read {0} {user.name}": "读取 {1} {user.name}"}, "Read {0} {user.name}")).toBe("Read {0} {user.name}");
+	const url = "(see https://example.com.)";
+	expect(lookup({[url]: "参见 https://example.com"}, url)).toBe("参见 https://example.com");
+});

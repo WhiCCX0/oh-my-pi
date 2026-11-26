@@ -9,12 +9,12 @@ const attributes = new Set(["label", "title", "description", "placeholder", "tex
 const headings: Dictionary = { USAGE: "用法", COMMANDS: "命令", ARGUMENTS: "参数", FLAGS: "选项", EXAMPLES: "示例" };
 
 // Unknown text or changed technical tokens fall back to English.
-const URL_PATTERN = /https?:\/\/[^\s"'<>。，；：！？、）】》」』]*/giu;
+const URL_PATTERN = /https?:\/\/[^\s"'`<>。，；：！？、）】》」』]*/giu;
 const URL_TRAILING_PUNCTUATION = /[.,;:!?。，；：！？、）】》」』]+$/u;
 const TOKEN_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
-	["flag", /--[A-Za-z][A-Za-z0-9-]*/g],
-	["printf", /%(?:\d+\$)?[-+#0]*(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|z|t|j|L)?[diuoxXfFeEgGaAcspn%]/g],
-	["placeholder", /\{\{[^{}]+\}\}|\$\{[^{}]+\}|\{[A-Za-z_$][\w$]*\}/g],
+	["flag", /(?<![\w-])--[A-Za-z][A-Za-z0-9-]*/g],
+	["printf", /%(?:\d+\$)?[-+#0]*(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|z|t|j|L)?[diuoxXfFeEgGaAcspnOj%]/g],
+	["placeholder", /\{\{[^{}]+\}\}|\$\{[^{}]+\}|\{(?:[0-9]+|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\}/g],
 ];
 function countCharacter(value: string, character: string): number {
 	return value.split(character).length - 1;
@@ -23,7 +23,9 @@ function normalizeUrl(value: string): string {
 	let result = value.replace(URL_TRAILING_PUNCTUATION, "");
 	let changed = true;
 	while (changed) {
-		changed = false;
+		const stripped = result.replace(URL_TRAILING_PUNCTUATION, "");
+		changed = stripped !== result;
+		result = stripped;
 		for (const [open, close] of [["(", ")"], ["[", "]"], ["{", "}"]] as const) {
 			if (result.endsWith(close) && countCharacter(result, close) > countCharacter(result, open)) {
 				result = result.slice(0, -1);
@@ -36,14 +38,18 @@ function normalizeUrl(value: string): string {
 // Compare technical tokens as a multiset while ignoring sentence punctuation around URLs.
 export function tokens(value: string): string {
 	const found: string[] = [];
+	const orderedPrintf: string[] = [];
 	const withoutUrls = value.replace(URL_PATTERN, url => {
 		found.push("url:" + normalizeUrl(url));
 		return " ".repeat(url.length);
 	});
 	for (const [kind, pattern] of TOKEN_PATTERNS) {
-		for (const match of withoutUrls.matchAll(pattern)) found.push(kind + ":" + match[0]);
+		for (const match of withoutUrls.matchAll(pattern)) {
+			if (kind === "printf") orderedPrintf.push(match[0]);
+			else found.push(kind + ":" + match[0]);
+		}
 	}
-	return found.sort().join("\n");
+	return [...found.sort(), ...orderedPrintf.map(value => "printf:" + value)].join("\n");
 }
 export function lookup(dict: Dictionary, value: string): string {
 	const result = Object.hasOwn(dict, value) ? dict[value] : undefined;
@@ -96,7 +102,8 @@ export function applyEdits(source: string, edits: Edit[], file = "<source>") {
 export function transform(source: string, file: string, dict: Dictionary) {
 	const edits: Edit[] = [];
 	const jsx = file.endsWith(".tsx");
-	const command = /\/(?:commands\/[^/]+|slash-commands\/builtin-[^/]+)\.ts$/.test(file);
+	const commandHelp = file === "packages/coding-agent/src/cli/command-help.ts";
+	const command = commandHelp || /\/(?:commands\/[^/]+|slash-commands\/builtin-[^/]+)\.ts$/.test(file);
 	const cli = file === "packages/utils/src/cli.ts";
 	const settingsPages = file === "packages/coding-agent/src/ui/overlays/settings/pages.ts";
 	function literal(node: Node, table: Dictionary = dict) {
@@ -121,7 +128,6 @@ export function transform(source: string, file: string, dict: Dictionary) {
 			}
 		}
 		if (jsx && node.type === "JSXAttribute" && attributes.has(node.name?.name)) {
-			const before = edits.length;
 			if (node.value?.type === "StringLiteral") {
 				const translated = lookup(dict, node.value.value);
 				if (translated !== node.value.value) {
@@ -129,12 +135,9 @@ export function transform(source: string, file: string, dict: Dictionary) {
 					edits.push({ start: node.value.start, end: node.value.end, text: "{" + JSON.stringify(translated) + "}" });
 				}
 			} else if (node.value?.type === "JSXExpressionContainer") expression(node.value.expression);
-			if (edits.length > before) return false;
 		}
-		if (jsx && node.type === "JSXExpressionContainer" && parent?.type === "JSXElement") {
-			const before = edits.length;
+		if (jsx && node.type === "JSXExpressionContainer" && (parent?.type === "JSXElement" || parent?.type === "JSXFragment")) {
 			expression(node.expression);
-			if (edits.length > before) return false;
 		}
 		if (settingsPages && node.type === "ObjectProperty" && !node.computed &&
 			["label", "lead"].includes(prop(node.key) ?? "") && node.value?.type === "StringLiteral") {
@@ -185,11 +188,12 @@ async function main() {
 		...await walk(join(root, "packages/coding-agent/src/slash-commands")),
 		...await walk(join(root, "packages/stats/src/client")),
 		join(root, "packages/utils/src/cli.ts"),
+		join(root, "packages/coding-agent/src/cli/command-help.ts"),
 	];
 	let count = 0; let modified = 0;
 	for (const file of paths) {
 		const name = relative(root, file).replaceAll("\\", "/");
-		if (!name.endsWith(".tsx") && !/\/(?:commands\/[^/]+|slash-commands\/builtin-[^/]+)\.ts$/.test(name) && name !== "packages/utils/src/cli.ts" && name !== "packages/coding-agent/src/ui/overlays/settings/pages.ts") continue;
+		if (!name.endsWith(".tsx") && !/\/(?:commands\/[^/]+|slash-commands\/builtin-[^/]+)\.ts$/.test(name) && name !== "packages/utils/src/cli.ts" && name !== "packages/coding-agent/src/cli/command-help.ts" && name !== "packages/coding-agent/src/ui/overlays/settings/pages.ts") continue;
 		const source = await readFile(file, "utf8");
 		const result = transform(source, name, dict);
 		if (result.count) { await writeFile(file, result.source); count += result.count; modified++; }

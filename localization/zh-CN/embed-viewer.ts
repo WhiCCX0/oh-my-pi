@@ -1,3 +1,4 @@
+import { parse } from "@babel/parser";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -28,4 +29,5 @@ if (start < 0 || !escapeLine || !inlineLine || !lines[start + 1]?.includes('view
 }
 source = replaceExactly(source, lines.slice(start, start + 2).join("\n"),
 	escapeLine.replace("viewer.replace(", "zhViewer.replace(") + "\n" + inlineLine, file);
+parse(source, { sourceType: "module", plugins: ["typescript"] });
 await writeFile(file, source);

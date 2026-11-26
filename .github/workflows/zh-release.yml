@@ -36,6 +36,7 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main
   prepare:
     runs-on: ubuntu-22.04
+    timeout-minutes: 5
     permissions:
       contents: write
     outputs:
@@ -46,6 +47,11 @@ jobs:
       bun: ${{ steps.release.outputs.bun }}
       sync: ${{ steps.release.outputs.sync }}
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Test release selection
+        run: python3 localization/zh-CN/release-plan.py --test
       - name: Resolve stable upstream release
         id: release
         shell: bash
@@ -61,58 +67,11 @@ jobs:
             exit 1
           fi
 
-          local_tag="zh-$tag-r$ZH_REVISION"
-          build=true
-          sync=true
-          # API errors must not be mistaken for missing releases.
           releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
-          release_state() {
-            jq -c --arg tag "$1" '[.[][] | select(.tag_name == $tag) | {isDraft: .draft, targetCommitish: .target_commitish}] | first // empty' <<< "$releases"
-          }
-          state=$(release_state "$local_tag")
-          if [[ -n "$state" ]]; then
-            is_draft=$(jq -r .isDraft <<< "$state")
-            draft_target=$(jq -r .targetCommitish <<< "$state")
-            if [[ "$is_draft" == "false" ]]; then sync=false; fi
-            if [[ "$is_draft" == "false" && "$GITHUB_EVENT_NAME" == "schedule" ]]; then
-              # Do not rebuild a published tag, but resume a matching draft
-              # from an interrupted publish attempt at a later revision.
-              build=false
-              revision=$((ZH_REVISION + 1))
-              while true; do
-                candidate="zh-$tag-r$revision"
-                candidate_state=$(release_state "$candidate")
-                if [[ -z "$candidate_state" ]]; then
-                  break
-                fi
-                candidate_draft=$(jq -r .isDraft <<< "$candidate_state")
-                candidate_target=$(jq -r .targetCommitish <<< "$candidate_state")
-                if [[ "$candidate_draft" == "true" && "$candidate_target" == "$GITHUB_SHA" ]]; then
-                  local_tag="$candidate"
-                  build=true
-                  break
-                fi
-                revision=$((revision + 1))
-              done
-            elif [[ "$is_draft" == "false" || "$draft_target" != "$GITHUB_SHA" ]]; then
-              revision=$((ZH_REVISION + 1))
-              while true; do
-                candidate="zh-$tag-r$revision"
-                candidate_state=$(release_state "$candidate")
-                if [[ -z "$candidate_state" ]]; then
-                  local_tag="$candidate"
-                  break
-                fi
-                candidate_draft=$(jq -r .isDraft <<< "$candidate_state")
-                candidate_target=$(jq -r .targetCommitish <<< "$candidate_state")
-                if [[ "$candidate_draft" == "true" && "$candidate_target" == "$GITHUB_SHA" ]]; then
-                  local_tag="$candidate"
-                  break
-                fi
-                revision=$((revision + 1))
-              done
-            fi
-          fi
+          plan=$(python3 localization/zh-CN/release-plan.py "$tag" "$ZH_REVISION" "$GITHUB_SHA" "$GITHUB_EVENT_NAME" <<< "$releases")
+          build=$(jq -r .build <<< "$plan")
+          sync=$(jq -r .sync <<< "$plan")
+          local_tag=$(jq -r .tag <<< "$plan")
           printf 'build=%s\nsync=%s\n' "$build" "$sync" >> "$GITHUB_OUTPUT"
           if [[ "$build" == "false" ]]; then
             echo "Stable release $tag already published; no compilation needed."
@@ -139,6 +98,7 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.build == 'true'
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -153,6 +113,11 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: ${{ needs.prepare.outputs.bun }}
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+      - name: Pin npm verifier
+        run: npm install -g npm@11.17.0 --ignore-scripts --registry=https://registry.npmjs.org
       - name: Install locked upstream dependencies
         working-directory: source
         run: bun install --frozen-lockfile
@@ -165,46 +130,33 @@ jobs:
           bun test ./.zh-build/translate.test.ts
           bun ./.zh-build/translate.ts
           git diff --check
-      - name: Install matching upstream native addon
+      - name: Verify and install matching upstream native addon
         working-directory: source
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          NATIVE: win32-x64
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
           dir=$(mktemp -d)
-          package="@oh-my-pi/pi-natives-$NATIVE@$VERSION"
-          for attempt in 1 2 3; do
-            if npm pack --ignore-scripts --json --pack-destination "$dir" "$package" > "$dir/pack.json"; then
-              break
-            fi
-            if [[ "$attempt" -eq 3 ]]; then
-              echo "::error::Failed to download $package after three attempts."
-              exit 1
-            fi
-            sleep $((attempt * 5))
-          done
-          tarball=$(jq -r '.[0].filename // empty' "$dir/pack.json")
-          integrity=$(jq -r '.[0].integrity // empty' "$dir/pack.json")
-          [[ -n "$tarball" && -f "$dir/$tarball" && -n "$integrity" ]]
-          actual_integrity="sha512-$(openssl dgst -sha512 -binary "$dir/$tarball" | openssl base64 -A)"
-          [[ "$actual_integrity" == "$integrity" ]]
-          tar -xzf "$dir/$tarball" -C "$dir"
-          node - "$dir/package/package.json" "$VERSION" "$NATIVE" <<'NODE'
-          const fs = require("node:fs");
-          const [file, version, native] = process.argv.slice(2);
-          const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
-          if (pkg.name !== "@oh-my-pi/pi-natives-" + native || pkg.version !== version) {
-            throw new Error("Native package identity/version mismatch");
-          }
-          NODE
-          shopt -s nullglob
-          addons=("$dir"/package/*.node)
-          [[ "${#addons[@]}" -gt 0 ]]
-          test -s "$dir/package/THIRD-PARTY-NOTICES.txt"
-          cp "${addons[@]}" packages/natives/native/
-          cp "$dir"/package/THIRD-PARTY-NOTICES.txt packages/natives/native/THIRD-PARTY-NOTICES.txt
+          trap 'rm -rf "$dir"' EXIT
+          export npm_config_registry=https://registry.npmjs.org
+          export npm_config_userconfig="$dir/.npmrc"
+          export npm_config_globalconfig="$dir/global.npmrc"
+          package="@oh-my-pi/pi-natives-win32-x64@$VERSION"
+          (
+            cd "$dir"
+            printf '{"private":true,"name":"native-verification","version":"1.0.0"}\n' > package.json
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund --os=win32 --cpu=x64 --save-exact "$package"
+            npm audit signatures --json --include-attestations > audit.json
+            npm pack --ignore-scripts --json "$package" > pack.json
+          )
+          tarball=$(jq -er '.[0].filename' "$dir/pack.json")
+          [[ "$tarball" =~ ^[A-Za-z0-9._-]+\.tgz$ ]]
+          python3 .zh-build/verify-native.py "$dir/$tarball" "$dir/audit.json" "$VERSION" "$SOURCE_SHA" "$dir/verified"
+          find packages/natives/native -maxdepth 1 -type f -name '*.node' -delete
+          cp "$dir/verified/"*.node packages/natives/native/
+          cp "$dir/verified/THIRD-PARTY-NOTICES.txt" packages/natives/native/
       - name: Regenerate localized export viewer manifest
         working-directory: source
         run: |
@@ -231,6 +183,7 @@ jobs:
     needs: [prepare, build]
     if: needs.prepare.outputs.build == 'true'
     runs-on: windows-2025
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -248,15 +201,19 @@ jobs:
           mkdir -p "$HOME" "$XDG_DATA_HOME"
           export USERPROFILE="$(cygpath -w "$HOME")" LOCALAPPDATA="$(cygpath -w "$runtime_dir/local")"
           mkdir -p "$runtime_dir/local"
-          "./$ASSET" --version | grep -F "$VERSION"
+          actual=$("./$ASSET" --version | tr -d "\r")
+          [[ "$actual" == "$VERSION" || "$actual" == "v$VERSION" || "$actual" == "omp $VERSION" || "$actual" == "omp/$VERSION" ]]
           "./$ASSET" --help > help.txt
           grep -F '用法' help.txt
           grep -F '要发送的消息' help.txt
+          "./$ASSET" update --check > update.txt 2>&1
+          grep -F "https://github.com/WhiCCX0/oh-my-pi/releases" update.txt
           "./$ASSET" --smoke-test
   publish:
     needs: [prepare, build, smoke]
     if: github.ref == 'refs/heads/main' && needs.prepare.outputs.build == 'true'
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -280,7 +237,8 @@ jobs:
           SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
-          state=$(gh release view "$TAG" --json isDraft,targetCommitish 2>/dev/null || true)
+          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          state=$(jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag) | {isDraft: .draft, targetCommitish: .target_commitish}] | if length > 1 then error("Duplicate release tag") else first // empty end' <<< "$releases")
           if [[ -n "$state" ]] && [[ $(jq -r .isDraft <<< "$state") == false ]]; then exit 0; fi
           if [[ -n "$state" ]] && [[ $(jq -r .targetCommitish <<< "$state") != "$GITHUB_SHA" ]]; then
             echo "::error::Existing draft targets a different overlay commit; bump ZH_REVISION or review the draft."
@@ -290,7 +248,7 @@ jobs:
           cp localization/zh-CN/LICENSE-dictionary dist/LICENSE-dictionary
           test -s legal/THIRD-PARTY-NOTICES.txt
           cp legal/THIRD-PARTY-NOTICES.txt dist/THIRD-PARTY-NOTICES.txt
-          (cd dist && sha256sum omp-windows-x64.exe > SHA256SUMS.txt)
+          (cd dist && sha256sum omp-windows-x64.exe LICENSE LICENSE-dictionary THIRD-PARTY-NOTICES.txt > SHA256SUMS.txt)
           printf '上游版本：v%s\n上游提交：%s\n汉化覆盖层提交：%s\n\n界面与帮助汉化，未覆盖的文字保留英文。仅发布 Windows x64 独立二进制，已通过 Windows x64 基础烟测。请从本仓库下载更新。\n' "$VERSION" "$SOURCE_SHA" "$GITHUB_SHA" > notes.md
           if [[ -z "$state" ]]; then
             gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG 简体中文版" --notes-file notes.md
