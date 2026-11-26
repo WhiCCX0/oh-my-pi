@@ -53,10 +53,15 @@ def main() -> int:
             failures.append(f"{heading}: final target-cpu flag is {cpu_flags[-1:] or 'missing'}")
         if "x86-64-v2" in cpu_flags:
             failures.append(f"{heading}: found an unexpected x86-64-v2 target flag")
-        if not cgu_flags or int(cgu_flags[-1]) != args.codegen_units:
+        # The upstream size-optimized executable is not a library codegen unit.
+        # It deliberately pins CGU=1 (also opt-level=z, panic=abort). Keep that
+        # upstream exception narrow; the ISA check above still applies to it.
+        helper = heading.startswith("Compiling Rust bin oauth_callback_relay (") and "//crates/natives:oauth_callback_relay" in section
+        expected_cgu = 1 if helper else args.codegen_units
+        if not cgu_flags or int(cgu_flags[-1]) != expected_cgu:
             failures.append(
                 f"{heading}: final codegen-units flag is {cgu_flags[-1:] or 'missing'}, "
-                f"expected {args.codegen_units}"
+                f"expected {expected_cgu}"
             )
 
     if failures:
