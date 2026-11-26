@@ -27,3 +27,6 @@
 - 六个平台分别上传原生模块第三方声明，并合并到 Release 资产。
 - 上游继承的 CI 在 push main 时请求上游专用自托管 Runner，Fork 中可能长期排队；PR 路径仍使用 GitHub 托管 Runner。Stale 工作流则使用 GitHub 托管 Runner 且已成功执行，不应与 CI 队列问题混为一谈。为保持上游文件零修改，本覆盖层不改写这两个工作流。
 - embed-viewer.ts 只修改构建临时目录中的 HTML index 并生成内嵌 viewer 文本，不覆盖上游 viewer-html.ts。编译器将 process.env.PI_COMPILED 定义为 true，汉化二进制的官方自更新保护已生效。
+
+- 新增全词典回归测试：合并后的 6,000+ 条映射逐项校验 URL、CLI flags、printf 指令及命名占位符，防止后续词典更新引入不兼容翻译。
+- 正式发布工作流仅由 main 分支触发；验证分支不再消耗六平台构建资源。定时任务可恢复同一 main 提交上中断的 Release 草稿。

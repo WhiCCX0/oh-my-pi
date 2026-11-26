@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { applyEdits, lookup, replaceExactly, transform } from "./translate";
 const dict = { Approve: "批准", Deny: "拒绝", "Use --model": "使用 --model", "Bad --model": "错误", "AI coding assistant": "AI 编程助手" };
 test("only display JSX positions change", () => {
@@ -63,6 +65,7 @@ test("printf directives, flags and named placeholders are protected", () => {
 	expect(lookup({ "Use --Model": "使用 --Model" }, "Use --Model")).toBe("使用 --Model");
 	expect(lookup({ "Use --Model": "使用 --model" }, "Use --Model")).toBe("Use --Model");
 	expect(lookup({ "Open {{path}}": "打开 {{file}}" }, "Open {{path}}")).toBe("Open {{path}}");
+	expect(lookup({ "Open ${path}": "打开 ${file}" }, "Open ${path}")).toBe("Open ${path}");
 });
 
 test("identical edits are deduplicated and conflicting overlaps fail with context", () => {
@@ -79,4 +82,18 @@ test("identical edits are deduplicated and conflicting overlaps fail with contex
 
 test("parse failures include the source path", () => {
 	expect(() => transform("const = ;", "broken.ts", {})).toThrow("broken.ts");
+});
+
+test("every shipped dictionary entry preserves technical tokens", async () => {
+	const names = ["dict-extra.json", "dict.json", "overrides.json"];
+	const layers = await Promise.all(names.map(async name =>
+		JSON.parse(await readFile(join(import.meta.dir, name), "utf8")) as Record<string, string>
+	));
+	const dictionary = Object.assign({}, ...layers) as Record<string, string>;
+	const mismatches = Object.entries(dictionary)
+		.filter(([source, translation]) => lookup(dictionary, source) !== translation);
+	if (mismatches.length > 0) {
+		throw new Error("Dictionary token mismatches: " + JSON.stringify(mismatches.slice(0, 10)));
+	}
+	expect(Object.keys(dictionary).length).toBeGreaterThan(6000);
 });

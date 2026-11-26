@@ -1,7 +1,7 @@
 name: 中文版同步与发布
 on:
   push:
-    branches: [main, zh-localization]
+    branches: [main]
     paths:
       - 'localization/zh-CN/**'
       - '.github/workflows/zh-release.yml'
@@ -41,8 +41,8 @@ jobs:
           sha=$(printf '%s\n' "$refs" | awk '/\^\{\}$/ { print $1; found=1 } END { if (!found) exit 1 }' || true)
           if [[ -z "$sha" ]]; then sha=$(printf '%s\n' "$refs" | awk 'NR == 1 { print $1 }'); fi
           [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
-          if [[ "$GITHUB_REF" != refs/heads/main && "$GITHUB_REF" != refs/heads/zh-localization ]]; then
-            echo "::error::Run this workflow from main (or zh-localization for validation only)."
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Run this workflow from main."
             exit 1
           fi
           ci_content=$(gh api "repos/$upstream/contents/.github/workflows/ci.yml?ref=$sha" --jq .content | base64 -d)
@@ -64,7 +64,25 @@ jobs:
             is_draft=$(jq -r .isDraft <<< "$state")
             draft_target=$(jq -r .targetCommitish <<< "$state")
             if [[ "$is_draft" == "false" && "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+              # Do not rebuild a published tag, but resume a matching draft
+              # from an interrupted publish attempt at a later revision.
               build=false
+              revision=$((ZH_REVISION + 1))
+              while true; do
+                candidate="zh-$tag-r$revision"
+                candidate_state=$(gh release view "$candidate" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish 2>/dev/null || true)
+                if [[ -z "$candidate_state" ]]; then
+                  break
+                fi
+                candidate_draft=$(jq -r .isDraft <<< "$candidate_state")
+                candidate_target=$(jq -r .targetCommitish <<< "$candidate_state")
+                if [[ "$candidate_draft" == "true" && "$candidate_target" == "$GITHUB_SHA" ]]; then
+                  local_tag="$candidate"
+                  build=true
+                  break
+                fi
+                revision=$((revision + 1))
+              done
             elif [[ "$is_draft" == "false" || "$draft_target" != "$GITHUB_SHA" ]]; then
               revision=$((ZH_REVISION + 1))
               while true; do
