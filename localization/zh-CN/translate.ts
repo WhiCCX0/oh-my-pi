@@ -9,17 +9,56 @@ const attributes = new Set(["label", "title", "description", "placeholder", "tex
 const headings: Dictionary = { USAGE: "用法", COMMANDS: "命令", ARGUMENTS: "参数", FLAGS: "选项", EXAMPLES: "示例" };
 
 // Unknown text or changed technical tokens fall back to English.
-const tokens = (s: string) =>
-	(s.match(/https?:\/\/[^\s"'<>]+|--[a-z][a-z0-9-]*|\{\{[^}]+\}\}/g) ?? []).sort().join("\n");
+const URL_PATTERN = /https?:\/\/[^\s"'<>]+/giu;
+const URL_TRAILING_PUNCTUATION = /[.,;:!?。，；：！？、]+$/u;
+const TOKEN_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+	["flag", /--[A-Za-z][A-Za-z0-9-]*/g],
+	["printf", /%(?:\d+\$)?[-+#0 ]*(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|z|t|j|L)?[diuoxXfFeEgGaAcspn%]/g],
+	["placeholder", /\{\{[^{}]+\}\}|\$\{[^{}]+\}|\{[A-Za-z_$][\w$]*\}/g],
+];
+function countCharacter(value: string, character: string): number {
+	return value.split(character).length - 1;
+}
+function normalizeUrl(value: string): string {
+	let result = value.replace(URL_TRAILING_PUNCTUATION, "");
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const [open, close] of [["(", ")"], ["[", "]"], ["{", "}"]] as const) {
+			if (result.endsWith(close) && countCharacter(result, close) > countCharacter(result, open)) {
+				result = result.slice(0, -1);
+				changed = true;
+			}
+		}
+	}
+	return result;
+}
+// Compare technical tokens as a multiset while ignoring sentence punctuation around URLs.
+export function tokens(value: string): string {
+	const found: string[] = [];
+	const withoutUrls = value.replace(URL_PATTERN, url => {
+		found.push("url:" + normalizeUrl(url));
+		return " ".repeat(url.length);
+	});
+	for (const [kind, pattern] of TOKEN_PATTERNS) {
+		for (const match of withoutUrls.matchAll(pattern)) found.push(kind + ":" + match[0]);
+	}
+	return found.sort().join("\n");
+}
 export function lookup(dict: Dictionary, value: string): string {
 	const result = Object.hasOwn(dict, value) ? dict[value] : undefined;
 	return typeof result === "string" && result.trim() && tokens(value) === tokens(result) ? result : value;
 }
 function ast(source: string, file: string) {
-	return parse(source, { sourceType: "module", plugins: file.endsWith(".tsx") ? ["typescript", "jsx"] : ["typescript"] });
+	try {
+		return parse(source, { sourceType: "module", plugins: file.endsWith(".tsx") ? ["typescript", "jsx"] : ["typescript"] });
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new Error("Unable to parse localization target " + file + ": " + detail, { cause: error });
+	}
 }
-function visit(node: Node, parent: Node | undefined, fn: (node: Node, parent?: Node) => void) {
-	fn(node, parent);
+function visit(node: Node, parent: Node | undefined, fn: (node: Node, parent?: Node) => boolean | void) {
+	if (fn(node, parent) === false) return;
 	for (const value of Object.values(node)) {
 		if (Array.isArray(value)) {
 			for (const item of value) if (item?.type) visit(item, node, fn);
@@ -29,12 +68,28 @@ function visit(node: Node, parent: Node | undefined, fn: (node: Node, parent?: N
 	}
 }
 const prop = (node: Node | undefined) => node?.type === "Identifier" ? node.name : node?.type === "StringLiteral" ? node.value : undefined;
-function applyEdits(source: string, edits: Edit[]) {
-	let previous = source.length;
-	for (const edit of edits.sort((a, b) => b.start - a.start)) {
-		if (edit.end > previous) throw new Error("Overlapping localization edits");
+export function applyEdits(source: string, edits: Edit[], file = "<source>") {
+	const unique = new Map<string, Edit>();
+	for (const edit of edits) {
+		if (edit.start < 0 || edit.end < edit.start || edit.end > source.length) {
+			throw new Error("Invalid localization edit range in " + file + ": " + edit.start + "-" + edit.end);
+		}
+		const key = String(edit.start) + ":" + String(edit.end);
+		const existing = unique.get(key);
+		if (existing) {
+			if (existing.text !== edit.text) throw new Error("Conflicting localization edits in " + file + " at " + key);
+			continue;
+		}
+		unique.set(key, edit);
+	}
+	const ordered = [...unique.values()].sort((a, b) => b.start - a.start || b.end - a.end);
+	let previousStart = source.length;
+	for (const edit of ordered) {
+		if (edit.end > previousStart) {
+			throw new Error("Overlapping localization edits in " + file + " at " + edit.start + "-" + edit.end);
+		}
 		source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
-		previous = edit.start;
+		previousStart = edit.start;
 	}
 	return source;
 }
@@ -66,22 +121,41 @@ export function transform(source: string, file: string, dict: Dictionary) {
 			}
 		}
 		if (jsx && node.type === "JSXAttribute" && attributes.has(node.name?.name)) {
+			const before = edits.length;
 			if (node.value?.type === "StringLiteral") {
 				const translated = lookup(dict, node.value.value);
-				if (translated !== node.value.value) edits.push({ start: node.value.start, end: node.value.end, text: "{" + JSON.stringify(translated) + "}" });
+				if (translated !== node.value.value) {
+					// JS string expressions safely encode quotes, backslashes and newlines.
+					edits.push({ start: node.value.start, end: node.value.end, text: "{" + JSON.stringify(translated) + "}" });
+				}
 			} else if (node.value?.type === "JSXExpressionContainer") expression(node.value.expression);
+			if (edits.length > before) return false;
 		}
-		if (jsx && node.type === "JSXExpressionContainer" && parent?.type === "JSXElement") expression(node.expression);
+		if (jsx && node.type === "JSXExpressionContainer" && parent?.type === "JSXElement") {
+			const before = edits.length;
+			expression(node.expression);
+			if (edits.length > before) return false;
+		}
 		if (settingsPages && node.type === "ObjectProperty" && !node.computed &&
-			["label", "lead"].includes(prop(node.key) ?? "") && node.value?.type === "StringLiteral") literal(node.value);
+			["label", "lead"].includes(prop(node.key) ?? "") && node.value?.type === "StringLiteral") {
+			const before = edits.length;
+			literal(node.value);
+			if (edits.length > before) return false;
+		}
 		if (command && (node.type === "ObjectProperty" || node.type === "ClassProperty") &&
-			!node.computed && prop(node.key) === "description" && node.value?.type === "StringLiteral") literal(node.value);
+			!node.computed && prop(node.key) === "description" && node.value?.type === "StringLiteral") {
+			const before = edits.length;
+			literal(node.value);
+			if (edits.length > before) return false;
+		}
 		if (cli && node.type === "CallExpression" && node.callee?.type === "MemberExpression" &&
 			node.callee.object?.name === "lines" && node.callee.property?.name === "push" && !node.callee.computed) {
+			const before = edits.length;
 			for (const arg of node.arguments) if (arg.type === "StringLiteral") literal(arg, headings);
+			if (edits.length > before) return false;
 		}
 	});
-	const result = applyEdits(source, edits);
+	const result = applyEdits(source, edits, file);
 	if (edits.length) ast(result, file);
 	return { source: result, count: edits.length };
 }
