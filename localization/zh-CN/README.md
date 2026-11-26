@@ -9,7 +9,7 @@
 - 使用官方同版本 npm native leaf（保留上游版本验证）和上游构建脚本；仅构建并发布 Windows x64 独立二进制，在 Windows x64 GitHub 托管 Runner 运行烟测。历史多平台发行保留。
 - 发布需通过转换测试、构建、Windows x64 烟测；附 SHA256 校验及上游版本、commit。无 npm 发布或官方发布凭据。
 
-词典基于 yebuwudong/omp-zh 的 dict.json 与 dict-extra.json（MIT，见 LICENSE-dictionary）；overrides.json 用于独立修订。不要添加机器标识的无条件替换。上游改动关键锚点时构建失败，需检查后修订。工作流每 6 小时及手动检查上游；同一发行标签不会覆盖。若需同一上游版本重发，将 workflow 的 ZH_REVISION 增加。
+词典基于 yebuwudong/omp-zh 的 dict.json 与 dict-extra.json（MIT，见 LICENSE-dictionary）；overrides.json 用于独立修订。不要添加机器标识的无条件替换。上游改动关键锚点时构建失败，需检查后修订。工作流每 15 分钟及手动检查上游正式 Release；无新版本不构建。独立源码同步工作流每日北京时间 20:23 触发，仅在 UTC epoch 偶数日实际合并（约每 48 小时一次），亦支持手动同步和同步工作流配置变更时立即同步。发现尚未发布中文版的新稳定版本时，发行工作流额外执行源码同步。GitHub 定时触发可能延迟；上游 Release 不直接触发 Fork。若需同一上游版本重发，将 workflow 的 ZH_REVISION 增加。
 
 参考 feigo313/oh-my-pi-zh 的资源隔离、yequ172672/oh-my-pi-cn 的显示层边界和 yebuwudong/omp-zh 的 AST 安全原则；未引入其它项目运行时代码。
 
@@ -31,4 +31,4 @@
 - 新增全词典回归测试：合并后的 6,000+ 条映射逐项校验 URL、CLI flags、printf 指令及命名占位符，防止后续词典更新引入不兼容翻译。
 - 正式发布工作流仅由 main 分支触发；验证分支不再触发正式构建。定时任务可恢复同一 main 提交上中断的 Release 草稿。
 
-- 上游 main 自动同步为独立的 `sync-upstream` 作业：使用 GitHub 原生非强制合并 API，不依赖发布版本是否变化；发生冲突时明确失败，不强推、不自动解决冲突。构建和发布仍使用本次运行固定的覆盖层提交与上游稳定 Tag，不受同步作业阻塞。
+- 上游 main 定期同步使用 `upstream-sync.yml`；新稳定 Release 由 `zh-release.yml` 的 `sync-upstream` 作业额外同步。两者使用相同并发组和 GitHub 原生非强制合并 API；发生冲突时明确失败，不强推、不自动解决冲突。构建和发布仍使用本次运行固定的覆盖层提交与上游稳定 Tag，不受同步作业阻塞。仅修改发行工作流或本 README 不会触发同版本重发，需重发时使用手动触发。

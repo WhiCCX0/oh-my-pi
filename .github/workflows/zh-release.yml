@@ -4,9 +4,9 @@ on:
     branches: [main]
     paths:
       - 'localization/zh-CN/**'
-      - '.github/workflows/zh-release.yml'
+      - '!localization/zh-CN/README.md'
   schedule:
-    - cron: '23 */6 * * *'
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -17,9 +17,13 @@ env:
   ZH_REVISION: '1'
 jobs:
   sync-upstream:
-    if: github.ref == 'refs/heads/main'
+    needs: prepare
+    if: github.ref == 'refs/heads/main' && needs.prepare.outputs.sync == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
+    concurrency:
+      group: upstream-main-sync
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -40,6 +44,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       build: ${{ steps.release.outputs.build }}
       bun: ${{ steps.release.outputs.bun }}
+      sync: ${{ steps.release.outputs.sync }}
     steps:
       - name: Resolve stable upstream release
         id: release
@@ -51,32 +56,24 @@ jobs:
           upstream=can1357/oh-my-pi
           tag=$(gh api "repos/$upstream/releases/latest" --jq .tag_name)
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          refs=$(git ls-remote "https://github.com/$upstream.git" "refs/tags/$tag" "refs/tags/$tag^{}")
-          sha=$(printf '%s\n' "$refs" | awk '/\^\{\}$/ { print $1; found=1 } END { if (!found) exit 1 }' || true)
-          if [[ -z "$sha" ]]; then sha=$(printf '%s\n' "$refs" | awk 'NR == 1 { print $1 }'); fi
-          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
           if [[ "$GITHUB_REF" != refs/heads/main ]]; then
             echo "::error::Run this workflow from main."
             exit 1
           fi
-          ci_content=$(gh api "repos/$upstream/contents/.github/workflows/ci.yml?ref=$sha" --jq .content | base64 -d)
-          bun=$(printf '%s\n' "$ci_content" | sed -nE "s/^[[:space:]]*bun-version:[[:space:]]*['\"]?([0-9]+\.[0-9]+\.[0-9]+)['\"]?[[:space:]]*(#.*)?$/\1/p" | sort -u)
-          bun_count=$(printf '%s\n' "$bun" | sed '/^$/d' | wc -l)
-          if [[ "$bun_count" -ne 1 ]]; then
-            package_json=$(gh api "repos/$upstream/contents/package.json?ref=$sha" --jq .content | base64 -d)
-            bun=$(printf '%s' "$package_json" | jq -r '.packageManager // empty' | sed -nE 's/^bun@[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p')
-          fi
-          [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "::error::Could not resolve one supported Bun version from upstream CI or packageManager."
-            exit 1
-          }
 
           local_tag="zh-$tag-r$ZH_REVISION"
           build=true
-          state=$(gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish 2>/dev/null || true)
+          sync=true
+          # API errors must not be mistaken for missing releases.
+          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          release_state() {
+            jq -c --arg tag "$1" '[.[][] | select(.tag_name == $tag) | {isDraft: .draft, targetCommitish: .target_commitish}] | first // empty' <<< "$releases"
+          }
+          state=$(release_state "$local_tag")
           if [[ -n "$state" ]]; then
             is_draft=$(jq -r .isDraft <<< "$state")
             draft_target=$(jq -r .targetCommitish <<< "$state")
+            if [[ "$is_draft" == "false" ]]; then sync=false; fi
             if [[ "$is_draft" == "false" && "$GITHUB_EVENT_NAME" == "schedule" ]]; then
               # Do not rebuild a published tag, but resume a matching draft
               # from an interrupted publish attempt at a later revision.
@@ -84,7 +81,7 @@ jobs:
               revision=$((ZH_REVISION + 1))
               while true; do
                 candidate="zh-$tag-r$revision"
-                candidate_state=$(gh release view "$candidate" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish 2>/dev/null || true)
+                candidate_state=$(release_state "$candidate")
                 if [[ -z "$candidate_state" ]]; then
                   break
                 fi
@@ -101,7 +98,7 @@ jobs:
               revision=$((ZH_REVISION + 1))
               while true; do
                 candidate="zh-$tag-r$revision"
-                candidate_state=$(gh release view "$candidate" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish 2>/dev/null || true)
+                candidate_state=$(release_state "$candidate")
                 if [[ -z "$candidate_state" ]]; then
                   local_tag="$candidate"
                   break
@@ -116,7 +113,28 @@ jobs:
               done
             fi
           fi
-          printf 'version=%s\nsha=%s\ntag=%s\nbuild=%s\nbun=%s\n' "${tag#v}" "$sha" "$local_tag" "$build" "$bun" >> "$GITHUB_OUTPUT"
+          printf 'build=%s\nsync=%s\n' "$build" "$sync" >> "$GITHUB_OUTPUT"
+          if [[ "$build" == "false" ]]; then
+            echo "Stable release $tag already published; no compilation needed."
+            exit 0
+          fi
+          refs=$(git ls-remote "https://github.com/$upstream.git" "refs/tags/$tag" "refs/tags/$tag^{}")
+          sha=$(printf '%s\n' "$refs" | awk '/\^\{\}$/ { print $1; found=1 } END { if (!found) exit 1 }' || true)
+          if [[ -z "$sha" ]]; then sha=$(printf '%s\n' "$refs" | awk 'NR == 1 { print $1 }'); fi
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
+          ci_content=$(gh api "repos/$upstream/contents/.github/workflows/ci.yml?ref=$sha" --jq .content | base64 -d)
+          bun=$(printf '%s\n' "$ci_content" | sed -nE "s/^[[:space:]]*bun-version:[[:space:]]*['\"]?([0-9]+\.[0-9]+\.[0-9]+)['\"]?[[:space:]]*(#.*)?$/\1/p" | sort -u)
+          bun_count=$(printf '%s\n' "$bun" | sed '/^$/d' | wc -l)
+          if [[ "$bun_count" -ne 1 ]]; then
+            package_json=$(gh api "repos/$upstream/contents/package.json?ref=$sha" --jq .content | base64 -d)
+            bun=$(printf '%s' "$package_json" | jq -r '.packageManager // empty' | sed -nE 's/^bun@[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p')
+          fi
+          [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Could not resolve one supported Bun version from upstream CI or packageManager."
+            exit 1
+          }
+
+          printf 'version=%s\nsha=%s\ntag=%s\nbun=%s\n' "${tag#v}" "$sha" "$local_tag" "$bun" >> "$GITHUB_OUTPUT"
   build:
     needs: prepare
     if: needs.prepare.outputs.build == 'true'
