@@ -1,6 +1,7 @@
 import { parse } from "@babel/parser";
 import { readFile, writeFile, readdir } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { join, relative } from "node:path";
+import { gzipSync } from "node:zlib";
 
 type Node = { type: string; start: number; end: number; [key: string]: any };
 type Dictionary = Readonly<Record<string, string>>;
@@ -181,58 +182,34 @@ async function walk(root: string): Promise<string[]> {
 	}
 	return out;
 }
-// No application module is executed on the cross-compilation host. The
-// settings registry imports native-dependent modules even during initialization.
-export function staticDisplayCandidates(source: string, file: string): Set<string> {
-	const values = new Set<string>();
-	function value(node: Node | undefined): string | undefined {
-		if (!node) return;
-		if (node.type === "StringLiteral") return node.value;
-		if (node.type === "TSAsExpression" || node.type === "TSSatisfiesExpression" || node.type === "TSNonNullExpression" || node.type === "ParenthesizedExpression") return value(node.expression);
-		if (node.type === "BinaryExpression" && node.operator === "+") {
-			const left = value(node.left), right = value(node.right);
-			if (left !== undefined && right !== undefined) return left + right;
-		}
-		if (node.type === "TemplateLiteral") {
-			const parts = node.expressions.map((part: Node) => value(part));
-			if (parts.every((part: string | undefined) => part !== undefined) && node.quasis.every((part: Node) => part.value?.cooked != null)) {
-				return node.quasis.map((part: Node, index: number) => part.value.cooked + (parts[index] ?? "")).join("");
-			}
-		}
-	}
-	visit(ast(source, file) as unknown as Node, undefined, node => {
-		const candidate = value(node);
-		if (candidate !== undefined) values.add(candidate);
-	});
-	return values;
-}
-
-async function settingsDictionaryCandidates(root: string): Promise<Set<string>> {
-	const src = join(root, "packages/coding-agent/src");
-	const registry = join(src, "config/all-settings.ts");
-	const source = await readFile(registry, "utf8");
-	const files = new Set<string>([registry]);
-	// Discover the real domain list from the same module used by settings-ui.
-	for (const item of ast(source, registry).program.body) {
-		if (item.type !== "ImportDeclaration" || !item.source.value.startsWith(".")) continue;
-		const target = resolve(dirname(registry), item.source.value.replace(/\.js$/, ""));
-		const candidates = [target.endsWith(".ts") || target.endsWith(".tsx") ? target : target + ".ts", target + ".tsx", join(target, "index.ts")];
-		let found = false;
-		for (const candidate of candidates) {
-			try { await readFile(candidate, "utf8"); files.add(candidate); found = true; break; }
-			catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-		}
-		if (!found) throw new Error("Unable to resolve settings domain " + item.source.value);
-	}
-	// Include helper settings modules, including platform-conditional literals.
-	for (const file of await walk(src)) {
-		if (/(?:^|[/\\])(?:[^/\\]*settings[^/\\]*|registry)\.ts$/.test(file)) files.add(file);
-	}
-	const values = new Set<string>();
-	for (const file of [...files].sort()) {
-		for (const candidate of staticDisplayCandidates(await readFile(file, "utf8"), file)) values.add(candidate);
-	}
-	return values;
+// Do not evaluate native-dependent registry modules during cross compilation,
+// and do not guess dynamic setting strings. The compiled projection selects
+// only actual requested values from a compressed dictionary on cache misses.
+export function renderRuntimeDictionary(entries: readonly (readonly [string, string])[]): { source: string; compressedBytes: number } {
+	const compressed = gzipSync(Buffer.from(JSON.stringify(Object.fromEntries(entries))), { level: 9 });
+	const source = [
+		'// Generated at build time. No full dictionary is allocated on import.',
+		'import { gunzipSync } from "node:zlib";',
+		'const encoded = ' + JSON.stringify(compressed.toString("base64")) + ';',
+		'export type ZhDisplay = (value: string) => string;',
+		'type DisplayEntry = { ui?: { label?: string; description?: string; warning?: string; options?: readonly { label?: string; description?: string }[] | "runtime" } };',
+		'function translatorFor(selected: ReadonlyMap<string, string>): ZhDisplay { return value => selected.get(value) ?? value; }',
+		'export function createZhDisplay(entries: readonly DisplayEntry[]): ZhDisplay {',
+		'  const requested = new Set<string>();',
+		'  const add = (value: string | undefined) => { if (typeof value === "string") requested.add(value); };',
+		'  for (const { ui } of entries) {',
+		'    if (!ui) continue; add(ui.label); add(ui.description); add(ui.warning);',
+		'    if (Array.isArray(ui.options)) for (const option of ui.options) { add(option.label); add(option.description); }',
+		'  }',
+		'  if (requested.size === 0) return value => value;',
+		'  const dictionary = JSON.parse(gunzipSync(Buffer.from(encoded, "base64")).toString("utf8")) as Record<string, string>;',
+		'  const selected = new Map<string, string>();',
+		'  for (const value of requested) if (Object.hasOwn(dictionary, value)) selected.set(value, dictionary[value]);',
+		'  return translatorFor(selected);',
+		'}',
+		'',
+	].join("\n");
+	return { source, compressedBytes: compressed.length };
 }
 async function main() {
 	const root = process.cwd();
@@ -261,20 +238,16 @@ async function main() {
 	const settings = join(root, "packages/coding-agent/src/config/settings-defs.ts");
 	let src = await readFile(settings, "utf8");
 	const validEntries = Object.entries(dict).filter(([k, v]) => k !== v && lookup(dict, k) === v);
-	// Conservatively extract candidates from the actual registry domain sources;
-	// the Windows smoke test proves every actual registered display value.
-	const values = await settingsDictionaryCandidates(root);
-	const entries = validEntries.filter(([key]) => values.has(key));
-	if (entries.length < 100 || entries.length >= validEntries.length) throw new Error("Unexpected settings dictionary coverage: " + entries.length);
-	// An external CI-only proof checks every real Windows registry value against
-	// the full dictionary without embedding the full dictionary in the EXE.
+	const generated = renderRuntimeDictionary(validEntries);
 	const proof = process.env.OMP_ZH_SMOKE_DICTIONARY_OUT;
 	if (proof) await writeFile(proof, JSON.stringify(Object.fromEntries(validEntries)));
-	console.log(JSON.stringify({ runtimeDictionaryEntries: entries.length, fullDictionaryEntries: validEntries.length, runtimeDictionaryBytes: Buffer.byteLength(JSON.stringify(entries)), fullDictionaryBytes: Buffer.byteLength(JSON.stringify(validEntries)) }));
-	await writeFile(join(root, "packages/coding-agent/src/config/zh-display.generated.ts"),
-		"// Generated at build time.\nconst entries = new Map<string, string>(" + JSON.stringify(entries) + ");\n" +
-		"export function zhDisplay(value: string): string { return entries.get(value) ?? value; }\n");
-	src = 'import { zhDisplay } from "./zh-display.generated";\n' + src;
+	console.log(JSON.stringify({ fullDictionaryEntries: validEntries.length, compressedDictionaryBytes: generated.compressedBytes, embeddedBase64Bytes: Math.ceil(generated.compressedBytes / 3) * 4, fullDictionaryBytes: Buffer.byteLength(JSON.stringify(Object.fromEntries(validEntries))) }));
+	await writeFile(join(root, "packages/coding-agent/src/config/zh-display.generated.ts"), generated.source);
+	src = 'import { createZhDisplay, type ZhDisplay } from "./zh-display.generated";\n' + src;
+	src = replaceExactly(src, 'function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {', 'function resolveOptions(ui: AnyUiMetadata, zhDisplay: ZhDisplay): OptionList | "runtime" | undefined {', settings);
+	src = replaceExactly(src, 'function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {', 'function entryToSettingDef(entry: SettingsDisplayEntry, zhDisplay: ZhDisplay): SettingDef | null {', settings);
+	src = replaceExactly(src, 'const options = resolveOptions(ui);', 'const options = resolveOptions(ui, zhDisplay);', settings);
+	src = replaceExactly(src, 'defs = [];\n\t\tfor (const entry of entries) {\n\t\t\tconst def = entryToSettingDef(entry);', 'defs = [];\n\t\tconst zhDisplay = createZhDisplay(entries);\n\t\tfor (const entry of entries) {\n\t\t\tconst def = entryToSettingDef(entry, zhDisplay);', settings);
 	for (const field of ["label", "description"]) src = replaceExactly(src, field + ": ui." + field + ",", field + ": zhDisplay(ui." + field + "),", settings);
 	src = replaceExactly(src, "warning: ui.warning,", "warning: ui.warning === undefined ? undefined : zhDisplay(ui.warning),", settings);
 	src = replaceExactly(src, "return ui.options;", "return ui.options.map(option => ({ ...option, label: zhDisplay(option.label), description: option.description === undefined ? undefined : zhDisplay(option.description) }));", settings);
@@ -309,10 +282,11 @@ async function main() {
 		'\tif (dictionaryPath) {',
 		'\t\tconst full = await Bun.file(dictionaryPath).json();',
 		'\t\tconst { orderedSettings } = await import("./config/all-settings");',
-		'\t\tconst { zhDisplay } = await import("./config/zh-display.generated");',
+		'\t\tconst { createZhDisplay } = await import("./config/zh-display.generated");',
+		'\t\tconst registered = orderedSettings(); const zhDisplay = createZhDisplay(registered);',
 		'\t\tlet matched = 0; const missing = new Set<string>();',
 		'\t\tconst check = (value: unknown) => { if (typeof value !== "string") return; const expected = Object.hasOwn(full, value) ? full[value] : value; if (zhDisplay(value) !== expected) missing.add(value); if (expected !== value) matched++; };',
-		'\t\tfor (const { ui } of orderedSettings()) { if (!ui) continue; check(ui.label); check(ui.description); check(ui.warning); if (Array.isArray(ui.options)) for (const option of ui.options) { check(option.label); check(option.description); } }',
+		'\t\tfor (const { ui } of registered) { if (!ui) continue; check(ui.label); check(ui.description); check(ui.warning); if (Array.isArray(ui.options)) for (const option of ui.options) { check(option.label); check(option.description); } }',
 		'\t\tif (missing.size) throw new Error("Settings dictionary mismatches (" + missing.size + "): " + JSON.stringify([...missing].slice(0, 50)));',
 		'\t\tif (matched < 100) throw new Error("Insufficient runtime settings dictionary verification: " + matched);',
 		'\t\tprocess.stdout.write("settings-dictionary-smoke: " + matched + " matches\\n");',

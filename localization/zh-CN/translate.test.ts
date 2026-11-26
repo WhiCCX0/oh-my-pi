@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import { applyEdits, lookup, replaceExactly, transform, staticDisplayCandidates } from "./translate";
+import { applyEdits, lookup, replaceExactly, transform, renderRuntimeDictionary } from "./translate";
 import { rewriteViewer } from "./embed-viewer";
 const dict = { Approve: "批准", Deny: "拒绝", "Use --model": "使用 --model", "Bad --model": "错误", "AI coding assistant": "AI 编程助手" };
 test("only display JSX positions change", () => {
@@ -131,11 +133,25 @@ test("decoded JSX entities translate without changing boundary whitespace", () =
 	expect(transform("<text>&nbsp;Approve &amp; continue</text>;", "ui.tsx", d).count).toBe(0);
 });
 
-test("static settings candidates retain concatenated, template and cast strings without evaluating modules", () => {
-	const source = 'import "./native-module"; const ui = { label: "Yolo", description: "Part " + "two", warning: `Read ${"this"}`, options: [{label: "Option" as const}] };';
-	const values = staticDisplayCandidates(source, "settings.ts");
-	for (const expected of ["Yolo", "Part two", "Read this", "Option"]) expect(values.has(expected)).toBe(true);
-	expect(values.has("native-module")).toBe(false);
+test("compressed dictionary projects real dynamic metadata without retaining unrelated translations", async () => {
+	const root = await mkdtemp(join(tmpdir(), "zh-dict-test-"));
+	try {
+		const generated = renderRuntimeDictionary([["Yolo", "全自动"], ["Dynamic label", "动态标签"], ["Risk", "风险"], ["Option", "选项"], ["Detail", "详情"], ["Unrelated", "无关"]]);
+		expect(generated.compressedBytes).toBeGreaterThan(0);
+		const file = join(root, "display.ts");
+		await writeFile(file, generated.source);
+		const { createZhDisplay } = await import(pathToFileURL(file).href);
+		const dynamic = "Dynamic" + " label";
+		const zh = createZhDisplay([{ ui: { label: dynamic, warning: "Risk", options: [{ label: "Option", description: "Detail", value: "Unrelated" }] } }, { ui: { label: "Yolo", options: "runtime" } }]);
+		expect(zh(dynamic)).toBe("动态标签");
+		expect(zh("Yolo")).toBe("全自动");
+		expect(zh("Risk")).toBe("风险");
+		expect(zh("Option")).toBe("选项");
+		expect(zh("Detail")).toBe("详情");
+		expect(zh("Unrelated")).toBe("Unrelated");
+		expect(zh("Missing")).toBe("Missing");
+		expect(createZhDisplay([])("Yolo")).toBe("Yolo");
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("viewer rewrite preserves CRLF and accepts comments between checked anchors", () => {
