@@ -16,6 +16,20 @@ concurrency:
 env:
   ZH_REVISION: '1'
 jobs:
+  sync-upstream:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Merge upstream main without force
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main
   prepare:
     runs-on: ubuntu-22.04
     permissions:
@@ -27,7 +41,7 @@ jobs:
       build: ${{ steps.release.outputs.build }}
       bun: ${{ steps.release.outputs.bun }}
     steps:
-      - name: Resolve stable release and sync upstream main
+      - name: Resolve stable upstream release
         id: release
         shell: bash
         env:
