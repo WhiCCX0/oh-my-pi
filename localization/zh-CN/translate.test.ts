@@ -35,12 +35,12 @@ test("critical anchors fail closed", () => {
 test("JSX safely encodes quotes, backslashes, newlines and markup", () => {
 	const special = {
 		"Title marker": '他说："C:\\temp"\n继续',
-		"Text marker {value}": "显示 <标签> {value}",
+		"Text marker": "显示 <标签> {}",
 	};
-	const result = transform('<item title="Title marker">Text marker {value}</item>;', "packages/coding-agent/src/ui/test.tsx", special);
+	const result = transform('<item title="Title marker">Text marker</item>;', "packages/coding-agent/src/ui/test.tsx", special);
 	expect(result.count).toBe(2);
 	expect(result.source).toContain("title={" + JSON.stringify(special["Title marker"]) + "}");
-	expect(result.source).toContain("{" + JSON.stringify(special["Text marker {value}"]) + "}");
+	expect(result.source).toContain("{" + JSON.stringify(special["Text marker"]) + "}");
 });
 
 test("URL sentence punctuation and balanced delimiters are normalized", () => {
@@ -54,7 +54,7 @@ test("printf directives, flags and named placeholders are protected", () => {
 	expect(lookup({ "Progress %s": "进度 %d" }, "Progress %s")).toBe("Progress %s");
 	expect(lookup({ "Use --Model": "使用 --Model" }, "Use --Model")).toBe("使用 --Model");
 	expect(lookup({ "Use --Model": "使用 --model" }, "Use --Model")).toBe("Use --Model");
-	expect(lookup({ "Open @{path}": "打开 @{file}" }, "Open @{path}")).toBe("Open @{path}");
+	expect(lookup({ "Open {{path}}": "打开 {{file}}" }, "Open {{path}}")).toBe("Open {{path}}");
 });
 
 test("identical edits are deduplicated and conflicting overlaps fail with context", () => {
