@@ -1,0 +1,224 @@
+name: Phase 1 expanded native tuning matrix
+on:
+  push:
+    branches: [experiment/native-avx2]
+    paths:
+      - '.github/workflows/native-phase1-expanded.yml'
+      - 'scripts/native-avx2/phase1-*.py'
+      - 'scripts/native-avx2/phase1-*.sh'
+      - 'scripts/native-avx2/phase1-*.ps1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-phase1-expanded
+  cancel-in-progress: false
+jobs:
+  check:
+    if: github.ref == 'refs/heads/experiment/native-avx2'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: can1357/oh-my-pi
+          ref: b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          path: upstream-source
+          persist-credentials: false
+      - name: Static gates and exact source overlay tests
+        run: |
+          set -euo pipefail
+          bash -n scripts/native-avx2/phase1-build.sh
+          python3 -m py_compile scripts/native-avx2/*.py
+          python3 scripts/native-avx2/test-aquery.py
+          python3 scripts/native-avx2/test-compiler-trace.py
+          python3 scripts/native-avx2/test-collect-verified.py
+          python3 scripts/native-avx2/test-phase1.py
+          for g in D16 D1 E16 E1 H16 H1; do
+            python3 scripts/native-avx2/phase1-overlay.py --source upstream-source --group "$g" --audit "$RUNNER_TEMP/$g"
+            git -C upstream-source diff --check
+            git -C upstream-source restore --source=HEAD --worktree -- .
+          done
+  build:
+    needs: check
+    if: github.ref == 'refs/heads/experiment/native-avx2'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        group: [D16, D1, E16, E1, H16, H1]
+    env:
+      GROUP: ${{ matrix.group }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: can1357/oh-my-pi
+          ref: b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          path: upstream-source
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.5'
+      - name: Install pinned Bazelisk and trace utility
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pinned-bazelisk"
+          curl --fail --location --retry 3 https://github.com/bazelbuild/bazelisk/releases/download/v1.30.0/bazelisk-linux-amd64 -o "$RUNNER_TEMP/pinned-bazelisk/bazelisk"
+          echo "a248ae2b2b62b5baebb748f6fba7203bff1a27e5d01b55399a8406744cb539e8  $RUNNER_TEMP/pinned-bazelisk/bazelisk" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/pinned-bazelisk/bazelisk"
+          echo "$RUNNER_TEMP/pinned-bazelisk" >> "$GITHUB_PATH"
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends strace
+          fi
+          df -h
+          free -h
+      - name: Build native addon and verify actual compiler arguments
+        run: |
+          set -euo pipefail
+          if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+          bash scripts/native-avx2/phase1-build.sh
+          python3 scripts/native-avx2/phase1-package.py manifest
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: phase1-audit-${{ matrix.group }}
+          path: phase1-audit/
+          if-no-files-found: warn
+          retention-days: 30
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ac1616560eb7d04d2a58afe97dcec88f310a1ad8
+          path: overlay
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: can1357/oh-my-pi
+          ref: b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          path: source
+          persist-credentials: false
+      - name: Install locked dependencies and identical localization
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          test "$(git -C ../overlay rev-parse HEAD)" = ac1616560eb7d04d2a58afe97dcec88f310a1ad8
+          bun install --frozen-lockfile
+          cp -R ../overlay/localization/zh-CN .zh-build
+          bun test ./.zh-build/translate.test.ts
+          bun ./.zh-build/translate.ts
+          bun --cwd=packages/collab-web run gen:export-viewer --write
+          bun ./.zh-build/embed-viewer.ts
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("packages/natives/native/loader-state.js")
+          s=p.read_text()
+          a='loadedAddon = describeLoadedAddon(bindings, candidate, ctx);'
+          if s.count(a)!=1: raise ValueError("Loader anchor")
+          p.write_text(s.replace(a,a+'\n\t\t\tstartupMarker("native:loadedPath:" + path.resolve(loadedAddon.path));'))
+          PY
+          git diff --check
+      - name: Package standalone EXE
+        working-directory: source
+        env:
+          RELEASE_TARGETS: win32-x64
+        run: |
+          set -euo pipefail
+          dir=packages/natives/native
+          find "$dir" -maxdepth 1 -type f -name '*.node' -delete
+          f=pi_natives.win32-x64-modern.node
+          cp "../phase1-native/$f" "$dir/$f"
+          test "$(find "$dir" -maxdepth 1 -name '*.node' | wc -l)" -eq 1
+          cmp "../phase1-native/$f" "$dir/$f"
+          bun run ci:release:build-binaries
+          mkdir -p ../dist
+          cp packages/coding-agent/binaries/omp-windows-x64.exe "../dist/$GROUP.exe"
+          cp ../phase1-native/manifest.json "../dist/$GROUP-native-manifest.json"
+          cp LICENSE "../dist/$GROUP-LICENSE"
+          cp .zh-build/LICENSE-dictionary "../dist/$GROUP-LICENSE-dictionary"
+          (cd ../dist && sha256sum "$GROUP.exe" > "$GROUP.sha256")
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase1-candidate-${{ matrix.group }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+  smoke:
+    needs: build
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/experiment/native-avx2' && (needs.build.result == 'success' || needs.build.result == 'failure') }}
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [D16, D1, E16, E1, H16, H1]
+    env:
+      GROUP: ${{ matrix.group }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify exact candidate before execution
+        id: prepare
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/native-avx2/phase1-package.py prepare
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate preparation failed' }
+      - name: Smoke on Windows or mark Raptor Lake local-only
+        working-directory: package-input
+        shell: pwsh
+        env:
+          PACKAGE_ID: ${{ steps.prepare.outputs.id }}
+          PACKAGE_DIGEST: ${{ steps.prepare.outputs.digest }}
+        run: |
+          & ../scripts/native-avx2/phase1-smoke.ps1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase1-receipt-${{ matrix.group }}
+          path: package-input/smoke-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+  collect:
+    needs: smoke
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/experiment/native-avx2' && (needs.smoke.result == 'success' || needs.smoke.result == 'failure') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Collect exact verified candidates with explicit smoke status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/native-avx2/phase1-package.py collect
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*-native-manifest.json
+            dist/SHA256SUMS.txt
+            dist/phase1-status.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OMP-phase1-expanded-candidates
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

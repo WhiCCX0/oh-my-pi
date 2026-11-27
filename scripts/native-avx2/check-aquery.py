@@ -41,7 +41,7 @@ def codegen(args, flag):
     return output
 
 
-def inspect(graph, variant, cgu, allow_cargo_only=False):
+def inspect(graph, variant, cgu, allow_cargo_only=False, modern_cpu="x86-64-v3", lto="thin"):
     labels = {str(t["id"]): t["label"] for t in graph["targets"]}
     configs = {str(c["id"]): c for c in graph.get("configuration", [])}
     errors = []
@@ -65,7 +65,7 @@ def inspect(graph, variant, cgu, allow_cargo_only=False):
             cpp_count += 1
             for arg in args:
                 if re.match(r"(?i)(?:/clang:)?(?:-march=|-mcpu=|/arch:)", arg):
-                    if variant == "baseline" or arg.lower() not in ("-march=x86-64-v3", "/clang:-march=x86-64-v3"):
+                    if variant == "baseline" or arg.lower() not in ("-march=" + modern_cpu, "/clang:-march=" + modern_cpu):
                         errors.append(label + ": unexpected C/C++ ISA override " + arg)
             continue
         target = any(arg == "--target=" + TRIPLE or
@@ -80,13 +80,13 @@ def inspect(graph, variant, cgu, allow_cargo_only=False):
         helper = label.endswith("//crates/natives:oauth_callback_relay")
         root = label.endswith("//crates/natives:pi_natives")
         root_count += int(root)
-        if root and codegen(args, "lto")[-1:] != ["thin"]:
-            errors.append(label + ": final addon does not explicitly carry ThinLTO")
+        if root and codegen(args, "lto")[-1:] != [lto]:
+            errors.append(label + ": final addon does not explicitly carry LTO=" + lto)
         expected_units = "1" if helper else str(cgu)
         if not units or units[-1] != expected_units:
             errors.append(f"{label}: CGU {units}, expected {expected_units}")
         if variant == "modern":
-            if not cpu or any(v != "x86-64-v3" for v in cpu):
+            if not cpu or any(v != modern_cpu for v in cpu):
                 errors.append(f"{label}: unexpected modern CPU flags {cpu}")
             if any(re.search(r"(?:^|,)-(?:avx2?|bmi2?|fma|f16c|lzcnt|movbe|sse4\.[12])(?:,|$)", f) for f in features):
                 errors.append(label + ": required v3 feature explicitly disabled")
@@ -108,8 +108,10 @@ def main():
     parser.add_argument("--variant", choices=("baseline", "modern"), required=True)
     parser.add_argument("--codegen-units", choices=(1, 16), type=int, required=True)
     parser.add_argument("--allow-cargo-only", action="store_true", help="Require separate actual Cargo compiler evidence; do not infer C/C++ coverage from aquery")
+    parser.add_argument("--modern-cpu", choices=("x86-64-v3", "raptorlake"), default="x86-64-v3")
+    parser.add_argument("--lto", choices=("thin", "fat"), default="thin")
     a = parser.parse_args()
-    errors, rust, cpp = inspect(json.loads(a.input.read_text()), a.variant, a.codegen_units, a.allow_cargo_only)
+    errors, rust, cpp = inspect(json.loads(a.input.read_text()), a.variant, a.codegen_units, a.allow_cargo_only, a.modern_cpu, a.lto)
     if errors:
         print("\n".join(errors[:30]), file=sys.stderr)
         return 1

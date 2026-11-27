@@ -87,7 +87,7 @@ def classify_arch_override(args, overrides, ancestry):
     return None
 
 
-def inspect(directory, variant):
+def inspect(directory, variant, modern_cpu="x86-64-v3"):
     parents, executables, compilers = {}, {}, []
     errors = []
     wrapper_invocations = 0
@@ -151,9 +151,9 @@ def inspect(directory, variant):
         ancestry = cargo_ancestor(pid)
         # A resolved Windows driver must receive the selected wrapper defaults.
         if variant == "modern":
-            defaults = ("-march=x86-64-v3", "/clang:-march=x86-64-v3")
+            defaults = ("-march=" + modern_cpu, "/clang:-march=" + modern_cpu)
             if not any(arg.lower() in defaults for arg in flags):
-                errors.append("Windows modern compiler missing v3 default: " + path)
+                errors.append("Windows modern compiler missing " + modern_cpu + " default: " + path)
         else:
             defaults = ("-march=x86-64", "-march=x86-64-v2", "/clang:-march=x86-64", "/clang:-march=x86-64-v2")
             if not all(flag in args for flag in ("-msse4.1", "-msse4.2")):
@@ -173,7 +173,7 @@ def inspect(directory, variant):
         errors.append("No actual Windows clang driver invocations observed")
     if not cargo_count:
         errors.append("No actual Windows compiler invocation descended from an identified Cargo build script")
-    return {"variant": variant, "compiler_invocations": len(records), "cargo_descendants": cargo_count,
+    return {"variant": variant, "modern_cpu": modern_cpu, "compiler_invocations": len(records), "cargo_descendants": cargo_count,
             "wrapper_invocations": wrapper_invocations, "wrapper_handoffs": wrapper_handoffs,
             "specialized_invocations": sum(bool(record["specialized_isa_flags"]) for record in records),
             "classified_isa_scopes": {scope: sum(record["isa_scope"] == scope for record in records)
@@ -186,8 +186,9 @@ def main():
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--variant", choices=("baseline", "modern"), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--modern-cpu", choices=("x86-64-v3", "raptorlake"), default="x86-64-v3")
     args = parser.parse_args()
-    evidence = inspect(args.input_dir, args.variant)
+    evidence = inspect(args.input_dir, args.variant, args.modern_cpu)
     args.output.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in evidence.items() if key != "records"}, indent=2))
     if evidence["errors"]:
