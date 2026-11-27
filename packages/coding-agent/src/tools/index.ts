@@ -16,6 +16,7 @@ import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
 	PreparedExtension,
+	TodoBackendChange,
 } from "../extensibility/extensions/types";
 import type { Skill, SkillRediscoveryHost } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
@@ -61,6 +62,7 @@ import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
 import { GithubTool } from "./gh";
+import { GitlabTool } from "./gl";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
 import { isIrcEnabled } from "../irc/messaging";
@@ -91,6 +93,7 @@ import {
 	cfgCheckpointEnabled,
 	cfgDebugEnabled,
 	cfgGithubEnabled,
+	cfgGitlabEnabled,
 	cfgGlobEnabled,
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
@@ -111,7 +114,7 @@ import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { StructuredSubagentSchemaMode } from "../task/task-details";
-import type { TodoPhase } from "./details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "./details/todo";
 
 export * from "../edit";
 export * from "../goals";
@@ -137,6 +140,7 @@ export * from "./eval-backends";
 export * from "./file-mutation-queue";
 export * from "./file-write-fallback";
 export * from "./gh";
+export * from "./gl";
 export * from "./glob";
 export * from "./grep";
 export * from "./jfind";
@@ -307,13 +311,14 @@ export interface ToolSession {
 	/** Imported extension factories safe to rebind in child sessions. */
 	preparedExtensions?: PreparedExtension[];
 	/**
-	 * Session-local extension roots for post-startup sub-discovery: explicit SDK
-	 * roots, discovery mode, and configured `extensions:`. A provider (not a
-	 * stored value) so it is materialized live per discovery call — a runtime
-	 * override or settings reload is reflected, never a construction-time
-	 * snapshot. Keeps the task surface byte-identical to the scoped load.
-	 * A standalone function, never a `this`-bound method: subagents forward it
-	 * as is, and a parked subagent keeps it for revival after its parent is gone.
+	 * Session-local extension roots for task-tool construction and post-startup
+	 * sub-discovery: explicit SDK roots, discovery mode, and configured
+	 * `extensions:`. A provider (not a stored value) so it is materialized live
+	 * per discovery call — a runtime override or settings reload is reflected,
+	 * never a construction-time snapshot. Keeps the task surface byte-identical
+	 * to the scoped load. A standalone function, never a `this`-bound method:
+	 * subagents forward it as is, and a parked subagent keeps it for revival
+	 * after its parent is gone.
 	 */
 	effectiveExtensionRoots?: () => EffectiveExtensionRoots;
 	/**
@@ -375,7 +380,12 @@ export interface ToolSession {
 	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
 	 */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
-		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir">>;
+		Partial<
+			Pick<
+				SessionManager,
+				"getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir" | "branchNavigationRevision"
+			>
+		>;
 	/**
 	 * Session-owned raw SSE capture, shared with the `/debug` report. Optional:
 	 * helper and standalone contexts without one simply forgo `/debug` capture.
@@ -515,6 +525,12 @@ export interface ToolSession {
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Put a `todo` call's change to the selected backend, committing it when the backend accepts or when no backend decides. */
+	applyTodoChange?: (
+		change: TodoBackendChange,
+		commit: () => void,
+		signal?: AbortSignal,
+	) => TodoApplyOutcome | Promise<TodoApplyOutcome>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */
@@ -631,6 +647,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	debug: DebugTool.createIf,
 	eval: s => new EvalTool(s),
 	github: GithubTool.createIf,
+	gitlab: GitlabTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
 	find: s => new FindTool(s),
@@ -820,6 +837,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (name === "grep") return cfgGrepEnabled.get(session.settings);
 		if (name === "find") return isFindEnabled(session);
 		if (name === "github") return cfgGithubEnabled.get(session.settings);
+		if (name === "gitlab") return cfgGitlabEnabled.get(session.settings);
 		if (name === "ast_grep") return cfgAstGrepEnabled.get(session.settings);
 		if (name === "ast_edit") return cfgAstEditEnabled.get(session.settings);
 		if (name === "web_search") return cfgWebSearchEnabled.get(session.settings);
@@ -1012,3 +1030,11 @@ export type {
 	GhRunWatchFailedLogDetails,
 	GhRunWatchViewDetails,
 } from "./details/github";
+
+export type {
+	GlToolDetails,
+	GlMrCheckoutSummary,
+	GlPipelineWatchJobDetails,
+	GlPipelineWatchFailedLogDetails,
+	GlPipelineWatchViewDetails,
+} from "./details/gitlab";

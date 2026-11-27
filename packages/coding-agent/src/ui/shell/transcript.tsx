@@ -43,6 +43,8 @@ import { mountNode, type ViewEntry, ViewList } from "./views";
 
 /** A block in the transcript. */
 export interface TranscriptBlock extends ViewEntry {
+	/** A real user prompt for transcript navigation, not a synthetic message. */
+	readonly prompt?: true;
 	/** Whether the block currently draws as compact rows (reactive). */
 	readonly compact: Accessor<boolean>;
 	/** The block draws its own blank row below it: no separator follows it. */
@@ -58,6 +60,7 @@ export interface TranscriptBlock extends ViewEntry {
 
 /** Options of {@link Transcript.append}. */
 export interface BlockOptions {
+	readonly prompt?: boolean;
 	/** Pack against compact neighbours (may change over time). */
 	readonly compact?: Accessor<boolean>;
 	/**
@@ -222,12 +225,9 @@ export class Transcript {
 	 * block had rows there.
 	 */
 	retain(keep: ReadonlySet<TranscriptBlock>): void {
-		let retired = false;
-		for (const block of this.#blocks.peek()) {
-			if (keep.has(block)) continue;
-			retired ||= this.retired(block);
-			this.#blocks.remove(block);
-		}
+		// Asked before the removed blocks are disposed.
+		const retired = this.#blocks.peek().some(block => !keep.has(block) && this.retired(block));
+		this.#blocks.retain(block => keep.has(block));
 		if (retired) this.#host?.replayHistory();
 	}
 
@@ -403,6 +403,7 @@ export class Transcript {
 			compact: options?.compact ?? NOT_COMPACT,
 			spacedBelow: options?.spacedBelow === true,
 			head: options?.head === true,
+			...(options?.prompt ? { prompt: true } : {}),
 			native: () => {
 				const nodes = native();
 				for (const node of nodes) this.#fallback(node);
