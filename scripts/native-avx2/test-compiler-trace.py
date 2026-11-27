@@ -95,6 +95,54 @@ class TraceTests(unittest.TestCase):
         result = gate.inspect(self.wrapper_fixture(["-msse4.1", "-msse4.2"], separate_pid=True), "baseline")
         self.assertTrue(any("no observed LLVM driver handoff" in e for e in result["errors"]))
 
+    def scoped_fixture(self, variant, override, source, output, defines=(), cargo=True):
+        import json
+        flags = ["-msse4.1", "-msse4.2"] if variant == "baseline" else ["/clang:-march=x86-64-v3"]
+        root = self.fixture(flags, cargo=cargo)
+        args = ["clang-cl", "--target=x86_64-pc-windows-msvc", *flags, override, *defines, "-Fo" + output, "-c", "--", source]
+        (root / "exec.101").write_text('execve("/llvm/bin/clang-cl", ' + json.dumps(args) + ', 0x123 /* 2 vars */) = 0\n')
+        return root
+
+    def test_exact_blake3_probe(self):
+        source = "/execroot/external/rules_rust++crate+crates__blake3-1.8.7/_bs.out_dir/flag_check.c"
+        for variant in ("baseline", "modern"):
+            result = gate.inspect(self.scoped_fixture(variant, "/arch:AVX512", source, source[:-2]), variant)
+            self.assertEqual(result["errors"], [])
+            self.assertEqual(result["classified_isa_scopes"], {"blake3-compiler-capability-probe": 1})
+
+    def test_blake3_real_unit_and_wrong_output_rejected(self):
+        source = "/execroot/external/rules_rust++crate+crates__blake3-1.8.7/_bs.out_dir/flag_check.c"
+        for candidate, output in [(source.replace("flag_check.c", "blake3_avx512.c"), source[:-2]), (source, "library.obj")]:
+            result = gate.inspect(self.scoped_fixture("modern", "/arch:AVX512", candidate, output), "modern")
+            self.assertTrue(any("Conflicting" in e for e in result["errors"]))
+
+    def test_exact_opus_probe(self):
+        source = "/execroot/external/rules_rust++crate+crates__opusic-sys-0.7.5/_bs.out_dir/build/CMakeFiles/CMakeScratch/TryCompile-4n9KlK/src.c"
+        result = gate.inspect(self.scoped_fixture("modern", "/arch:AVX2", source, "CMakeFiles/cmTC_44c9d.dir/src.c.obj", ["-DAVX2_SUPPORTED"]), "modern")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["classified_isa_scopes"], {"opus-cmake-capability-probe": 1})
+
+    def test_exact_opus_specializations(self):
+        root = "/execroot/external/rules_rust++crate+crates__opusic-sys-0.7.5/_bs.cargo_runfiles/rules_rust++crate+crates__opusic-sys-0.7.5/opus/"
+        for variant in ("baseline", "modern"):
+            for unit in ("celt/x86/pitch_avx.c", "silk/x86/NSQ_del_dec_avx2.c", "silk/float/x86/inner_product_FLP_avx2.c"):
+                result = gate.inspect(self.scoped_fixture(variant, "/arch:AVX2", root + unit, "CMakeFiles/opus.dir/" + unit + ".obj", ["-DOPUS_HAVE_RTCD", "-DOPUS_X86_MAY_HAVE_AVX2"]), variant)
+                self.assertEqual(result["errors"], [])
+                self.assertEqual(result["classified_isa_scopes"], {"opus-runtime-dispatch-translation-unit": 1})
+
+    def test_reject_unscoped_opus_flags(self):
+        root = "/execroot/external/rules_rust++crate+crates__opusic-sys-0.7.5/_bs.cargo_runfiles/rules_rust++crate+crates__opusic-sys-0.7.5/opus/"
+        unit = "celt/x86/pitch_avx.c"
+        good = ["-DOPUS_HAVE_RTCD", "-DOPUS_X86_MAY_HAVE_AVX2"]
+        for override, source, defines, cargo in [
+            ("/arch:AVX512", unit, good, True),
+            ("/arch:AVX2", "celt/ordinary.c", good, True),
+            ("/arch:AVX2", unit, good[:1], True),
+            ("/arch:AVX2", unit, good, False),
+        ]:
+            result = gate.inspect(self.scoped_fixture("modern", override, root + source, "CMakeFiles/opus.dir/" + source + ".obj", defines, cargo), "modern")
+            self.assertTrue(any("Conflicting" in e for e in result["errors"]))
+
     def test_truncated_compiler_argv(self):
         result = gate.parse_exec('execve("/llvm/bin/clang-cl", ["clang-cl", ...], 0x123 /* 2 vars */) = 0')
         self.assertEqual(result, ("/llvm/bin/clang-cl", None))

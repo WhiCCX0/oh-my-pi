@@ -44,6 +44,49 @@ def windows_target(args):
     return False
 
 
+# Exact, version-pinned exceptions observed in the A1/B trace of run
+# 45851970391. Keep the list narrow: flags on other TUs are not equivalent.
+BLAKE3_PROBE = re.compile(r"(?:^|/)external/rules_rust\+\+crate\+crates__blake3-1\.8\.7/_bs\.out_dir/flag_check\.c$")
+OPUS_ROOT = r"(?:^|/)external/rules_rust\+\+crate\+crates__opusic-sys-0\.7\.5/"
+OPUS_PROBE = re.compile(OPUS_ROOT + r"_bs\.out_dir/build/CMakeFiles/CMakeScratch/TryCompile-[A-Za-z0-9]+/src\.c$")
+OPUS_UNIT = re.compile(OPUS_ROOT + r"_bs\.cargo_runfiles/rules_rust\+\+crate\+crates__opusic-sys-0\.7\.5/opus/(celt/x86/pitch_avx\.c|silk/x86/NSQ_del_dec_avx2\.c|silk/float/x86/inner_product_FLP_avx2\.c)$")
+
+
+def classify_arch_override(args, overrides, ancestry):
+    """Recognize only the observed compile-only probes and isolated Opus TUs.
+
+    An exception is evidence of scope, not a proof of final link/dispatch.
+    No blanket allowance for AVX512, nor for /arch:AVX2 on other sources.
+    """
+    if not overrides:
+        return None
+    if not ancestry or not CARGO.search(ancestry):
+        return None
+    # The observed compiler command has a single source after "-c --".
+    # Refuse to classify an ambiguous or link invocation as a probe/TU.
+    if len(args) < 4 or args[-3:-1] != ["-c", "--"]:
+        return None
+    source = args[-1]
+    if ".." in source.split("/") or "\\" in source:
+        return None
+    outputs = [a[3:] for a in args[:-3] if a.startswith(("-Fo", "/Fo"))]
+    if len(outputs) != 1:
+        return None
+    output = outputs[0]
+    if overrides == ["/arch:avx512"] and BLAKE3_PROBE.search(source):
+        if output == source.removesuffix(".c"):
+            return "blake3-compiler-capability-probe"
+    if overrides == ["/arch:avx2"]:
+        if OPUS_PROBE.search(source) and "-DAVX2_SUPPORTED" in args:
+            if re.fullmatch(r"CMakeFiles/cmTC_[A-Za-z0-9]+\.dir/src\.c\.obj", output):
+                return "opus-cmake-capability-probe"
+        unit = OPUS_UNIT.search(source)
+        if unit and {"-DOPUS_HAVE_RTCD", "-DOPUS_X86_MAY_HAVE_AVX2"} <= set(args):
+            if output == "CMakeFiles/opus.dir/" + unit.group(1) + ".obj":
+                return "opus-runtime-dispatch-translation-unit"
+    return None
+
+
 def inspect(directory, variant):
     parents, executables, compilers = {}, {}, []
     errors = []
@@ -108,20 +151,23 @@ def inspect(directory, variant):
         ancestry = cargo_ancestor(pid)
         # A resolved Windows driver must receive the selected wrapper defaults.
         if variant == "modern":
-            if not any(arg.lower() in ("-march=x86-64-v3", "/clang:-march=x86-64-v3") for arg in flags):
+            defaults = ("-march=x86-64-v3", "/clang:-march=x86-64-v3")
+            if not any(arg.lower() in defaults for arg in flags):
                 errors.append("Windows modern compiler missing v3 default: " + path)
-            if any(arg.lower() not in ("-march=x86-64-v3", "/clang:-march=x86-64-v3") for arg in flags):
-                errors.append("Conflicting modern global ISA override: " + repr(flags))
         else:
+            defaults = ("-march=x86-64", "-march=x86-64-v2", "/clang:-march=x86-64", "/clang:-march=x86-64-v2")
             if not all(flag in args for flag in ("-msse4.1", "-msse4.2")):
                 errors.append("Windows baseline compiler missing SSE4 defaults: " + path)
-            if any(arg.lower() not in ("-march=x86-64", "-march=x86-64-v2", "/clang:-march=x86-64", "/clang:-march=x86-64-v2") for arg in flags):
-                # A per-TU specialization can be legitimate, but needs dispatch review.
-                special.extend(flags)
+        overrides = [arg.lower() for arg in flags if arg.lower() not in defaults]
+        scope = classify_arch_override(args, overrides, ancestry)
+        if overrides:
+            special.extend(overrides)
+            if scope is None:
+                errors.append(f"Conflicting {variant} global ISA override: {flags!r}; input: {args[-1] if args else '?'}")
         if response:
             errors.append("Unexpanded Windows compiler response file: " + repr(response))
         records.append({"pid": pid, "compiler": path, "wrapper": wrapper, "argv": args, "cargo_ancestor": ancestry,
-                        "specialized_isa_flags": sorted(set(special)), "response_files": response})
+                        "specialized_isa_flags": sorted(set(special)), "isa_scope": scope, "response_files": response})
     cargo_count = sum(bool(record["cargo_ancestor"]) for record in records)
     if not records:
         errors.append("No actual Windows clang driver invocations observed")
@@ -130,6 +176,8 @@ def inspect(directory, variant):
     return {"variant": variant, "compiler_invocations": len(records), "cargo_descendants": cargo_count,
             "wrapper_invocations": wrapper_invocations, "wrapper_handoffs": wrapper_handoffs,
             "specialized_invocations": sum(bool(record["specialized_isa_flags"]) for record in records),
+            "classified_isa_scopes": {scope: sum(record["isa_scope"] == scope for record in records)
+                                      for scope in sorted({record["isa_scope"] for record in records if record["isa_scope"]})},
             "records": records, "errors": list(dict.fromkeys(errors))}
 
 
