@@ -1,0 +1,22 @@
+name: Recover exact smoke-verified AVX2 packages
+on:
+  push:
+    branches: [experiment/native-avx2]
+    paths:
+      - '.github/workflows/native-avx2-recovery.yml'
+permissions:
+  contents: read
+concurrency:
+  group: native-avx2-experiment
+  cancel-in-progress: false
+jobs:
+  recover:
+    if: github.ref == 'refs/heads/experiment/native-avx2'
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/native-avx2-package.yml
+    with:
+      recover_smoke: true

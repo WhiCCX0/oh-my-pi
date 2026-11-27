@@ -7,6 +7,10 @@ on:
         description: Collect actual compiler subprocess evidence (fresh builds)
         type: boolean
         default: true
+      recover_smoke:
+        description: 'Recover only the exact four packages from run 45921779633 (no rebuild)'
+        type: boolean
+        default: false
   push:
     branches: [experiment/native-avx2]
     paths:
@@ -22,7 +26,7 @@ concurrency:
 jobs:
   build:
     name: Build A0 / A1 / B / C (Windows x64)
-    if: github.ref == 'refs/heads/experiment/native-avx2'
+    if: github.ref == 'refs/heads/experiment/native-avx2' && !inputs.recover_smoke
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     env:
@@ -147,3 +151,14 @@ jobs:
     with:
       artifact_id: ${{ needs.build.outputs.artifact_id }}
       artifact_digest: ${{ needs.build.outputs.artifact_digest }}
+
+  recover-smoke:
+    if: github.ref == 'refs/heads/experiment/native-avx2' && github.event_name == 'workflow_dispatch' && inputs.recover_smoke
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/native-avx2-package.yml
+    with:
+      recover_smoke: true

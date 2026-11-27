@@ -3,11 +3,16 @@ on:
   workflow_call:
     inputs:
       artifact_id:
-        required: true
+        required: false
         type: string
+        default: ''
       artifact_digest:
-        required: true
+        required: false
         type: string
+        default: ''
+      recover_smoke:
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
@@ -16,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   package:
-    if: github.ref == 'refs/heads/experiment/native-avx2'
+    if: github.ref == 'refs/heads/experiment/native-avx2' && !inputs.recover_smoke
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     strategy:
@@ -181,6 +186,7 @@ jobs:
           retention-days: 30
   smoke:
     needs: package
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/experiment/native-avx2' && (needs.package.result == 'success' || (inputs.recover_smoke && needs.package.result == 'skipped')) }}
     runs-on: windows-2025
     timeout-minutes: 15
     strategy:
@@ -196,37 +202,40 @@ jobs:
           - group: C
             variant: modern
     steps:
-      - name: Resolve exact package artifact from this run
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: policy
+          persist-credentials: false
+      - name: Verify and extract exactly one package archive before execution
         id: artifact
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GROUP: ${{ matrix.group }}
+          RECOVER_SMOKE: ${{ inputs.recover_smoke }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $pages = gh api --paginate "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/artifacts?per_page=100" --jq '.artifacts[] | @json'
-          if ($LASTEXITCODE -ne 0) { throw 'Artifact lookup failed' }
-          $all = @($pages | ForEach-Object { $_ | ConvertFrom-Json })
-          $matches = @($all | Where-Object { $_.name -eq "experiment-exe-$env:GROUP" -and -not $_.expired })
-          if ($matches.Count -ne 1 -or $matches[0].digest -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Expected one immutable package artifact' }
-          "id=$($matches[0].id)" >> $env:GITHUB_OUTPUT
-          "digest=$($matches[0].digest)" >> $env:GITHUB_OUTPUT
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          artifact-ids: ${{ steps.artifact.outputs.id }}
-          merge-multiple: true
+          python policy/scripts/native-avx2/collect-verified.py --prepare-smoke
+          if ($LASTEXITCODE -ne 0) { throw 'Verified artifact preparation failed' }
       - name: Validate EXE and exact loaded addon on Windows
         shell: pwsh
+        working-directory: package-input
         env:
           GROUP: ${{ matrix.group }}
           VARIANT: ${{ matrix.variant }}
           PACKAGE_ID: ${{ steps.artifact.outputs.id }}
           PACKAGE_DIGEST: ${{ steps.artifact.outputs.digest }}
+          PRODUCER_RUN: ${{ steps.artifact.outputs.producer_run }}
+          PRODUCER_SHA: ${{ steps.artifact.outputs.producer_sha }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:PACKAGE_ID -notmatch '^[0-9]+$' -or $env:PACKAGE_DIGEST -notmatch '^sha256:[a-f0-9]{64}$' -or $env:PRODUCER_RUN -notmatch '^[0-9]+$' -or $env:PRODUCER_SHA -notmatch '^[a-f0-9]{40}$') { throw 'Missing verified package identity' }
           $expectedNames = @("$env:GROUP.exe","$env:GROUP-native-manifest.json","$env:GROUP-LICENSE","$env:GROUP-LICENSE-dictionary","$env:GROUP.sha256")
           $items = @(Get-ChildItem -LiteralPath $PWD -Force)
           if ($items.Count -ne $expectedNames.Count -or @($items | Where-Object { $_.PSIsContainer -or $_.Name -cnotin $expectedNames }).Count) { throw 'Unexpected package contents' }
+          $before = [ordered]@{}
+          foreach ($name in $expectedNames) { $before[$name] = (Get-FileHash -LiteralPath (Join-Path $PWD $name) -Algorithm SHA256).Hash.ToLowerInvariant() }
+          $manifest = Get-Content -Raw "$env:GROUP-native-manifest.json" | ConvertFrom-Json -AsHashtable
+          if ($manifest.experiment.workflow_commit -cne $env:PRODUCER_SHA -or $manifest.source.commit -cne 'b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac') { throw 'Native manifest producer mismatch' }
           $exe = Join-Path $PWD "$env:GROUP.exe"
           $root = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $root | Out-Null
@@ -258,13 +267,15 @@ jobs:
             if ($paths.Count -ne 1 -or $paths[0].Index -le $markers[0].Index -or $paths[0].Index -ge $done[0].Index) { throw 'Missing exact loaded native path' }
             $loadedPath = (Resolve-Path -LiteralPath $paths[0].Groups[1].Value).Path
             if (-not [string]::Equals($loadedPath, $addons[0].FullName, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native loaded path mismatch' }
-            $manifest = Get-Content -Raw "$env:GROUP-native-manifest.json" | ConvertFrom-Json -AsHashtable
             $hash = (Get-FileHash -LiteralPath $addons[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($hash -ne $manifest.experiment.groups[$env:GROUP].sha256) { throw "Loaded addon hash mismatch" }
             $files = [ordered]@{}
-            foreach ($name in $expectedNames) { $files[$name] = (Get-FileHash -LiteralPath (Join-Path $PWD $name) -Algorithm SHA256).Hash.ToLowerInvariant() }
+            foreach ($name in $expectedNames) {
+              $files[$name] = (Get-FileHash -LiteralPath (Join-Path $PWD $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($files[$name] -cne $before[$name]) { throw "Package file changed during smoke: $name" }
+            }
             if ($files["$env:GROUP.exe"] -ne $expectedExe) { throw 'EXE changed after smoke' }
-            $receipt = [ordered]@{group=$env:GROUP;runId=$env:GITHUB_RUN_ID;sourceSha=$env:GITHUB_SHA;artifactId=$env:PACKAGE_ID;artifactDigest=$env:PACKAGE_DIGEST;files=$files;loadedAddonSha256=$hash}
+            $receipt = [ordered]@{group=$env:GROUP;runId=$env:GITHUB_RUN_ID;sourceSha=$env:GITHUB_SHA;producerRunId=$env:PRODUCER_RUN;producerSha=$env:PRODUCER_SHA;artifactId=$env:PACKAGE_ID;artifactDigest=$env:PACKAGE_DIGEST;files=$files;loadedAddonSha256=$hash}
             $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PWD "smoke-receipt.json") -Encoding utf8NoBOM
             Write-Host "Verified exact $env:GROUP native addon: $hash"
           } finally {
@@ -273,11 +284,12 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: smoke-receipt-${{ matrix.group }}
-          path: smoke-receipt.json
+          path: package-input/smoke-receipt.json
           if-no-files-found: error
           retention-days: 30
   collect:
-    needs: [package, smoke]
+    needs: smoke
+    if: ${{ always() && !cancelled() && needs.smoke.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
@@ -293,6 +305,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RECOVER_SMOKE: ${{ inputs.recover_smoke }}
         run: python3 scripts/native-avx2/collect-verified.py
       - name: Attest verified EXE checksums and native manifests
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
@@ -308,6 +321,7 @@ jobs:
             dist/C-native-manifest.json
             dist/SHA256SUMS.txt
             dist/smoke-receipts.json
+            dist/producer.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: OMP-AVX2-four-verified-EXEs
