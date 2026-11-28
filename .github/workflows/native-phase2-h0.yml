@@ -1,0 +1,212 @@
+name: Phase 2 H0 baseline Fat LTO
+
+on:
+  push:
+    branches: [phase2/h0-baseline-fat-lto]
+    paths:
+      - '.github/workflows/native-phase2-h0.yml'
+      - 'scripts/native-avx2/phase2-*'
+      - 'scripts/native-avx2/test-phase2.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-phase2-h0
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Static gates and H0 overlay regression tests
+        run: |
+          set -euo pipefail
+          bash -n scripts/native-avx2/phase2-build.sh
+          python3 -m py_compile scripts/native-avx2/phase2-*.py
+          python3 scripts/native-avx2/test-phase2.py
+          python3 scripts/native-avx2/test-aquery.py
+          python3 scripts/native-avx2/test-compiler-trace.py
+          python3 scripts/native-avx2/test-collect-verified.py
+
+  build:
+    needs: check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    outputs:
+      artifact_id: ${ needs.build.outputs.artifact_id }}
+      artifact_digest: ${ needs.build.outputs.artifact_digest }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: can1357/oh-my-pi
+          ref: b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          path: upstream-source
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ac1616560eb7d04d2a58afe97dcec88f310a1ad8
+          path: localization-overlay
+          sparse-checkout: localization/zh-CN
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.5'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+      - name: Pin npm packaging tool
+        run: npm install -g npm@11.17.0 --ignore-scripts --registry=https://registry.npmjs.org
+      - name: Install pinned Bazelisk and trace utility
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pinned-bazelisk"
+          curl --fail --location --retry 3 https://github.com/bazelbuild/bazelisk/releases/download/v1.30.0/bazelisk-linux-amd64 -o "$RUNNER_TEMP/pinned-bazelisk/bazelisk"
+          echo "a248ae2b2b62b5baebb748f6fba7203bff1a27e5d01b55399a8406744cb539e8  $RUNNER_TEMP/pinned-bazelisk/bazelisk" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/pinned-bazelisk/bazelisk"
+          echo "$RUNNER_TEMP/pinned-bazelisk" >> "$GITHUB_PATH"
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends strace
+          fi
+          command -v objdump
+          df -h
+          free -h
+      - name: Build H0 Native Addon and audit actual compiler arguments
+        run: |
+          set -euo pipefail
+          if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+          test "$(git -C upstream-source rev-parse HEAD)" = b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          bash scripts/native-avx2/phase2-build.sh
+      - name: Install locked dependencies and identical localization
+        working-directory: upstream-source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = b55cd1bb664d8ab46ddc77f2a34eb47555dbf1ac
+          test "$(git -C ../localization-overlay rev-parse HEAD)" = ac1616560eb7d04d2a58afe97dcec88f310a1ad8
+          bun install --frozen-lockfile
+          cp -R ../localization-overlay/localization/zh-CN .zh-build
+          bun test ./.zh-build/translate.test.ts
+          bun ./.zh-build/translate.ts
+          bun --cwd=packages/collab-web run gen:export-viewer --write
+          bun ./.zh-build/embed-viewer.ts
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("packages/natives/native/loader-state.js")
+          s = p.read_text()
+          anchor = 'loadedAddon = describeLoadedAddon(bindings, candidate, ctx);'
+          if s.count(anchor) != 1:
+              raise ValueError("H0 loaded-path instrumentation anchor mismatch")
+          p.write_text(s.replace(anchor, anchor + '\n\t\t\tstartupMarker("native:loadedPath:" + path.resolve(loadedAddon.path));'))
+          PY
+          git diff --check
+      - name: Package the exact H0 addon into a standalone Windows EXE
+        working-directory: upstream-source
+        env:
+          RELEASE_TARGETS: win32-x64
+        run: |
+          set -euo pipefail
+          dir=packages/natives/native
+          find "$dir" -maxdepth 1 -type f -name '*.node' -delete
+          file=pi_natives.win32-x64-baseline.node
+          cp ../phase2-native/$file "$dir/$file"
+          test "$(find "$dir" -maxdepth 1 -type f -name '*.node' | wc -l)" -eq 1
+          cmp ../phase2-native/$file "$dir/$file"
+          bun run ci:release:build-binaries
+          mkdir -p ../dist
+          cp packages/coding-agent/binaries/omp-windows-x64.exe ../dist/H0.exe
+          cp ../phase2-native/manifest.json ../dist/H0-native-manifest.json
+          cp LICENSE ../dist/H0-LICENSE
+          cp .zh-build/LICENSE-dictionary ../dist/H0-LICENSE-dictionary
+          (cd ../dist && sha256sum H0.exe > H0.sha256)
+          python3 ../scripts/native-avx2/phase2-package.py verify-local ../dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: phase2-audit-H0
+          path: |
+            phase2-audit/
+            phase2-native/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Upload exact H0 package for Windows smoke
+        id: candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase2-candidate-H0
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  smoke:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Download and verify the exact H0 package
+        id: prepare
+        shell: pwsh
+        env:
+          GH_TOKEN: ${ github.token }}
+        run: |
+          python scripts/native-avx2/phase2-package.py prepare
+          if ($LASTEXITCODE -ne 0) { throw 'H0 candidate preparation failed' }
+      - name: H0 baseline startup, localized help, native shell and loaded-addon hash
+        working-directory: package-input
+        shell: pwsh
+        env:
+          PACKAGE_ID: ${ steps.prepare.outputs.id }}
+          PACKAGE_DIGEST: ${ steps.prepare.outputs.digest }}
+        run: |
+          & ../scripts/native-avx2/phase2-smoke.ps1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase2-smoke-receipt-H0
+          path: package-input/smoke-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  collect:
+    needs: smoke
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Collect only the exact smoke-accepted H0 candidate
+        env:
+          GH_TOKEN: ${ github.token }}
+        run: python3 scripts/native-avx2/phase2-package.py collect
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: |
+            dist/H0.exe
+            dist/H0-native-manifest.json
+            dist/H0.sha256
+            dist/phase2-status.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase2-H0-verified
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
